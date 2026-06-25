@@ -1,0 +1,33 @@
+name: yuqiao_app
+description: Yuqiao MVP - an AAC expression assistant for Chinese aphasia users.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_tts: ^4.2.2
+  http: ^1.2.2
+  camerawesome:
+    path: CamerAwesome-master
+  image_picker: ^1.1.2
+  image_cropper: ^12.2.1
+  image: ^4.9.1
+  geolocator: ^14.0.2
+  google_mlkit_object_detection: ^0.15.0
+  shared_preferences: ^2.3.2
+  path_provider: ^2.1.5
+  record: ^7.1.0
+  crypto: ^3.0.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

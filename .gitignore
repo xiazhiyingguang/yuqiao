@@ -1,0 +1,41 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+coverage/
+
+# Android
+android/.gradle/
+android/app/build/
+android/local.properties
+android/.idea/
+android/.kotlin/
+
+# iOS
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Pods/
+ios/.symlinks/
+
+# IDE
+*.iml
+.idea/
+.vscode/
+.firecrawl/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# APK outputs
+*.apk
+*.aab
+
+# Mooncat design assets (independent project, not part of main app)
+mooncat/
+
+# Plan files
+.claude/
