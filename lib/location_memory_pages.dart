@@ -1,13 +1,19 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'location_recommendation.dart';
 
 typedef FavoriteWordCallback = Future<void> Function(String text);
+
+const bool _showInternalDebugControls = false;
+const bool _locationMemoryDebugLogs = false;
+
+void _locationMemoryDebugLog(String message) {
+  if (_locationMemoryDebugLogs) debugPrint(message);
+}
 
 class CurrentPlaceStatusCard extends StatefulWidget {
   const CurrentPlaceStatusCard({
@@ -45,7 +51,8 @@ class _CurrentPlaceStatusCardState extends State<CurrentPlaceStatusCard> {
     return ListenableBuilder(
       listenable: widget.controller,
       builder: (context, _) {
-        if (!widget.controller.enabled || widget.controller.currentSuggestionDismissed) {
+        if (!widget.controller.enabled ||
+            widget.controller.currentSuggestionDismissed) {
           return const SizedBox.shrink();
         }
         final place = widget.controller.currentPlace;
@@ -71,137 +78,138 @@ class _CurrentPlaceStatusCardState extends State<CurrentPlaceStatusCard> {
           opacity: 1.0,
           duration: const Duration(milliseconds: 300),
           child: Container(
-          padding: const EdgeInsets.fromLTRB(14, 11, 10, 11),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.72),
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: Colors.white, width: 1.1),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x12000000),
-                blurRadius: 18,
-                offset: Offset(0, 6),
-              ),
-            ],
-          ),
-          child: userConfirmed
-              ? Row(
-                  children: [
-                    const Icon(
-                      CupertinoIcons.location_fill,
-                      color: Color(0xFF267D70),
-                      size: 19,
-                    ),
-                    const SizedBox(width: 9),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
+            padding: const EdgeInsets.fromLTRB(14, 11, 10, 11),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.72),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: Colors.white, width: 1.1),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x12000000),
+                  blurRadius: 18,
+                  offset: Offset(0, 6),
+                ),
+              ],
+            ),
+            child: userConfirmed
+                ? Row(
+                    children: [
+                      const Icon(
+                        CupertinoIcons.location_fill,
+                        color: Color(0xFF267D70),
+                        size: 19,
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              place!.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF1C1C1E),
+                              ),
+                            ),
+                            Text(
+                              '$typeLabel · 已确认',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF6E7178),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '修改地点',
+                        onPressed: () => showPlaceEditorDialog(
+                          context,
+                          controller: widget.controller,
+                          place: place,
+                        ),
+                        icon: const Icon(CupertinoIcons.pencil, size: 18),
+                      ),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
                         children: [
-                          Text(
-                            place!.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF1C1C1E),
+                          const Icon(
+                            CupertinoIcons.location_fill,
+                            color: Color(0xFF267D70),
+                            size: 18,
+                          ),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: Text(
+                              '这里可能是：$typeLabel',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF1C1C1E),
+                              ),
                             ),
                           ),
                           Text(
-                            '$typeLabel · 已确认',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFF6E7178),
+                            '自动建议',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey.shade600,
                             ),
                           ),
                         ],
                       ),
-                    ),
-                    IconButton(
-                      tooltip: '修改地点',
-                      onPressed: () => showPlaceEditorDialog(
-                        context,
-                        controller: widget.controller,
-                        place: place,
-                      ),
-                      icon: const Icon(CupertinoIcons.pencil, size: 18),
-                    ),
-                  ],
-                )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(
-                          CupertinoIcons.location_fill,
-                          color: Color(0xFF267D70),
-                          size: 18,
+                      const SizedBox(height: 3),
+                      Text(
+                        '是否保存为$typeLabel？  $name',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF6E7178),
                         ),
-                        const SizedBox(width: 7),
-                        Expanded(
-                          child: Text(
-                            '这里可能是：$typeLabel',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF1C1C1E),
+                      ),
+                      const SizedBox(height: 7),
+                      Row(
+                        children: [
+                          _PlaceActionButton(
+                            label: '确认',
+                            primary: true,
+                            onTap: () =>
+                                widget.controller.confirmCurrentSuggestion(
+                              name: typeLabel,
+                              type: type,
                             ),
                           ),
-                        ),
-                        Text(
-                          '自动建议',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.grey.shade600,
+                          const SizedBox(width: 7),
+                          _PlaceActionButton(
+                            label: '修改',
+                            onTap: () => showPlaceEditorDialog(
+                              context,
+                              controller: widget.controller,
+                              place: place,
+                              semantic: semantic,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      '是否保存为$typeLabel？  $name',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF6E7178),
+                          const SizedBox(width: 7),
+                          _PlaceActionButton(
+                            label: '暂不',
+                            onTap: widget.controller.dismissCurrentSuggestion,
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 7),
-                    Row(
-                      children: [
-                        _PlaceActionButton(
-                          label: '确认',
-                          primary: true,
-                          onTap: () => widget.controller.confirmCurrentSuggestion(
-                            name: typeLabel,
-                            type: type,
-                          ),
-                        ),
-                        const SizedBox(width: 7),
-                        _PlaceActionButton(
-                          label: '修改',
-                          onTap: () => showPlaceEditorDialog(
-                            context,
-                            controller: widget.controller,
-                            place: place,
-                            semantic: semantic,
-                          ),
-                        ),
-                        const SizedBox(width: 7),
-                        _PlaceActionButton(
-                          label: '暂不',
-                          onTap: widget.controller.dismissCurrentSuggestion,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                    ],
+                  ),
           ),
         );
       },
@@ -437,7 +445,7 @@ class _PlaceMemoryManagementPageState extends State<PlaceMemoryManagementPage> {
               ),
               const SizedBox(height: 12),
             ],
-          if (kDebugMode) ...[
+          if (_showInternalDebugControls) ...[
             const SizedBox(height: 10),
             _LocationDebugTools(controller: controller),
           ],
@@ -835,7 +843,7 @@ class _LocationDebugTools extends StatelessWidget {
                 onPressed: () async {
                   final json = controller.exportDataJson();
                   await Clipboard.setData(ClipboardData(text: json));
-                  debugPrint(json);
+                  _locationMemoryDebugLog(json);
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('地点 JSON 已复制到剪贴板')),

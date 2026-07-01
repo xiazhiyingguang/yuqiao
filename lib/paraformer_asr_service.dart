@@ -10,6 +10,12 @@ typedef AsrTranscriptCallback = void Function(String text, bool isFinal);
 typedef AsrStatusCallback = void Function(String status);
 typedef AsrErrorCallback = void Function(String message);
 
+const bool kParaformerAsrDebugLogs = false;
+
+void _paraformerDebugLog(String message) {
+  if (kParaformerAsrDebugLogs) debugPrint(message);
+}
+
 class ParaformerAsrService {
   static const String _dashScopeApiKey = String.fromEnvironment(
     'DASHSCOPE_API_KEY',
@@ -112,7 +118,7 @@ class ParaformerAsrService {
         cancelOnError: false,
       );
       _onStatus?.call('正在聆听');
-      debugPrint('[Paraformer ASR] streaming task=$_taskId');
+      _paraformerDebugLog('[Paraformer ASR] streaming task=$_taskId');
     } catch (error) {
       await _cleanup();
       if (error is ParaformerAsrException) rethrow;
@@ -128,7 +134,7 @@ class ParaformerAsrService {
     try {
       await _recorder.stop();
     } catch (error) {
-      debugPrint('[Paraformer ASR] recorder stop failed: $error');
+      _paraformerDebugLog('[Paraformer ASR] recorder stop failed: $error');
     }
     await _audioSubscription?.cancel();
     _audioSubscription = null;
@@ -159,7 +165,7 @@ class ParaformerAsrService {
       final header = decoded['header'];
       if (header is! Map<String, dynamic>) return;
       final event = header['event']?.toString();
-      debugPrint('[Paraformer ASR] event=$event');
+      _paraformerDebugLog('[Paraformer ASR] event=$event');
 
       switch (event) {
         case 'task-started':
@@ -178,7 +184,7 @@ class ParaformerAsrService {
             final text = sentence['text']?.toString().trim() ?? '';
             final isFinal = sentence['sentence_end'] == true;
             if (text.isNotEmpty) {
-              debugPrint(
+              _paraformerDebugLog(
                 '[Paraformer ASR] result final=$isFinal chars=${text.length}',
               );
               _onTranscript?.call(text, isFinal);
@@ -201,13 +207,13 @@ class ParaformerAsrService {
           break;
       }
     } catch (error) {
-      debugPrint('[Paraformer ASR] invalid event: $error data=$data');
+      _paraformerDebugLog('[Paraformer ASR] invalid event: $error data=$data');
     }
   }
 
   void _fail(String message) {
     if (!_active || _stopping) return;
-    debugPrint('[Paraformer ASR] $message');
+    _paraformerDebugLog('[Paraformer ASR] $message');
     _onError?.call(message);
     unawaited(_cleanup());
   }

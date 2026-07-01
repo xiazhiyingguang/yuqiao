@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
 
@@ -6,9 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 
-import 'location_recommendation.dart'; // TODO: 调试用，以后删除
+import 'location_recommendation.dart'; // TODO: 璋冭瘯鐢紝浠ュ悗鍒犻櫎
 import 'location_memory_pages.dart';
 import 'my_test.dart' as profile_ui;
+import 'rehab_training.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,7 +19,9 @@ void main() {
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
-      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarColor: Color(0xFFF7F2EA),
+      systemNavigationBarDividerColor: Colors.transparent,
+      systemNavigationBarContrastEnforced: false,
       statusBarIconBrightness: Brightness.dark,
       systemNavigationBarIconBrightness: Brightness.dark,
     ),
@@ -46,9 +50,13 @@ class MyApp extends StatelessWidget {
         onVocabulary: () {},
         locationRecommendationEnabled: false,
         personalizedLearningEnabled: true,
+        autoStuckDetectionEnabled: false,
+        expressionPreferenceSummary: '少 · 图文一起 · 正常',
         savedPlaceCount: 0,
         onLocationRecommendationChanged: (_) {},
         onPersonalizedLearningChanged: (_) {},
+        onAutoStuckDetectionChanged: (_) {},
+        onOpenExpressionPreferences: () {},
         onClearPersonalizedLearningData: () {},
         onClearPlaceData: () {},
       ),
@@ -100,15 +108,21 @@ class MainInterfaceScreen extends StatefulWidget {
   final VoidCallback onVocabulary;
   final bool locationRecommendationEnabled;
   final bool personalizedLearningEnabled;
+  final bool autoStuckDetectionEnabled;
+  final String expressionPreferenceSummary;
   final int savedWordCount;
   final int savedPlaceCount;
   final int savedPersonalObjectCount;
   final ValueChanged<bool> onLocationRecommendationChanged;
   final ValueChanged<bool> onPersonalizedLearningChanged;
+  final ValueChanged<bool> onAutoStuckDetectionChanged;
+  final VoidCallback onOpenExpressionPreferences;
   final VoidCallback onClearPersonalizedLearningData;
   final VoidCallback onClearPlaceData;
-  final LocationRecommendationController? locationController; // TODO: 调试用，以后删除
+  final LocationRecommendationController?
+      locationController; // TODO: 璋冭瘯鐢紝浠ュ悗鍒犻櫎
   final FavoriteWordCallback? onFavoriteSaved;
+  final VoidCallback? onOpenYuqiaoMemory;
   final VoidCallback? onOpenPersonalObjects;
 
   const MainInterfaceScreen({
@@ -119,15 +133,20 @@ class MainInterfaceScreen extends StatefulWidget {
     required this.onVocabulary,
     required this.locationRecommendationEnabled,
     required this.personalizedLearningEnabled,
+    required this.autoStuckDetectionEnabled,
+    required this.expressionPreferenceSummary,
     this.savedWordCount = 0,
     required this.savedPlaceCount,
     this.savedPersonalObjectCount = 0,
     required this.onLocationRecommendationChanged,
     required this.onPersonalizedLearningChanged,
+    required this.onAutoStuckDetectionChanged,
+    required this.onOpenExpressionPreferences,
     required this.onClearPersonalizedLearningData,
     required this.onClearPlaceData,
     this.locationController,
     this.onFavoriteSaved,
+    this.onOpenYuqiaoMemory,
     this.onOpenPersonalObjects,
   });
 
@@ -136,7 +155,7 @@ class MainInterfaceScreen extends StatefulWidget {
 }
 
 class _MainInterfaceScreenState extends State<MainInterfaceScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   final List<Offset> _baseOffsets = const [
     Offset(-95, -95),
     Offset(95, -95),
@@ -157,10 +176,14 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
   late final AnimationController _starIdleController;
   late Animation<Offset> _springAnimation;
   late final PageController _pageController;
+  Map<String, RehabTrainingProgress> _trainingProgress = const {};
+  int _trainingWordCount = 0;
   int _currentPage = 1;
-  String _userName = '朋友';
+  final String _userName = '朋友';
   double _pointerDownX = 0;
   double _pointerDownY = 0;
+  bool _isDraggingFeatureBubble = false;
+  bool _appInForeground = true;
 
   final double _targetThreshold = 65.0;
 
@@ -177,7 +200,10 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _pageController = PageController(initialPage: 1);
+    _trainingWordCount = RehabTrainingDeck.words().length;
+    unawaited(_loadTrainingProgress());
 
     _springController = AnimationController(
       vsync: this,
@@ -198,15 +224,65 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
     _starIdleController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 4600),
-    )..repeat();
+    );
+    _syncStarIdleAnimation();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pageController.dispose();
     _springController.dispose();
     _starIdleController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final inForeground = state == AppLifecycleState.resumed;
+    if (_appInForeground == inForeground) return;
+    _appInForeground = inForeground;
+    if (!inForeground) {
+      _springController.stop();
+    }
+    _syncStarIdleAnimation();
+  }
+
+  void _syncStarIdleAnimation() {
+    final shouldAnimate = _appInForeground && _currentPage == 1;
+    if (shouldAnimate) {
+      if (!_starIdleController.isAnimating) {
+        _starIdleController.repeat();
+      }
+    } else if (_starIdleController.isAnimating) {
+      _starIdleController.stop();
+    }
+  }
+
+  Future<void> _loadTrainingProgress() async {
+    final progress = await RehabTrainingStore().loadAll();
+    if (!mounted) return;
+    setState(() => _trainingProgress = progress);
+  }
+
+  Future<void> _openRehabTraining({
+    RehabTrainingMode mode = RehabTrainingMode.mixed,
+  }) async {
+    await Navigator.of(context).push(
+      CupertinoPageRoute(
+        builder: (_) => RehabTrainingPage(initialMode: mode),
+      ),
+    );
+    await _loadTrainingProgress();
+  }
+
+  Future<void> _openRehabTrainingSummary() async {
+    await Navigator.of(context).push(
+      CupertinoPageRoute(
+        builder: (_) => const RehabTrainingSummaryPage(),
+      ),
+    );
+    await _loadTrainingProgress();
   }
 
   void _runSpringAnimation(Offset releaseOffset, int index) {
@@ -251,7 +327,7 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          '✨ 小星星正在打开「${feature.label}」功能界面',
+          '打开${feature.label}',
           style: const TextStyle(
             fontWeight: FontWeight.bold,
             color: Colors.white,
@@ -272,9 +348,11 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
 
   void _onPageChanged(int page) {
     setState(() => _currentPage = page);
+    _syncStarIdleAnimation();
   }
 
   void _goToPage(int page) {
+    if (page == _currentPage || page < 0 || page > 2) return;
     _pageController.animateToPage(
       page,
       duration: const Duration(milliseconds: 350),
@@ -282,352 +360,14 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF5F7FB),
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFFF9FBFF), Color(0xFFEFF5FF), Color(0xFFF7F2EA)],
-          ),
-        ),
-        child: SafeArea(
-          bottom: false,
-          child: Column(
-            children: [
-              Expanded(
-                child: Listener(
-                  onPointerDown: (e) {
-                    _pointerDownX = e.position.dx;
-                    _pointerDownY = e.position.dy;
-                  },
-                  onPointerUp: (e) {
-                    final dx = e.position.dx - _pointerDownX;
-                    final dy = e.position.dy - _pointerDownY;
-                    if (dx.abs() > 80 && dx.abs() > dy.abs() * 2) {
-                      if (dx < 0 && _currentPage < 2) {
-                        _goToPage(_currentPage + 1);
-                      } else if (dx > 0 && _currentPage > 0) {
-                        _goToPage(_currentPage - 1);
-                      }
-                    }
-                  },
-                  child: PageView(
-                    controller: _pageController,
-                    physics: const NeverScrollableScrollPhysics(),
-                    onPageChanged: _onPageChanged,
-                    children: [
-                      _buildPlaceholderPage('表达', '常用表达和快捷入口'),
-                      RepaintBoundary(child: _buildHomePage()),
-                      RepaintBoundary(child: _buildSettingsPage()),
-                    ],
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8, left: 12, right: 12),
-                child: RepaintBoundary(
-                  child: GlassBottomNavigationBar(
-                    currentPage: _currentPage,
-                    onTap: _goToPage,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPlaceholderPage(String title, String subtitle) {
-    return Stack(
-      children: [
-        const Positioned.fill(
-          child: RepaintBoundary(
-            child: LiquidBackgroundDecorations(),
-          ),
-        ),
-        Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF1C1C1E),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                subtitle,
-                style: const TextStyle(
-                  fontSize: 15,
-                  color: Color(0xFF8E8E93),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildSettingsPage() {
-    final controller = widget.locationController;
-    final unconfirmedCount = controller != null
-        ? controller.places.where((p) => !p.isUserConfirmed).length
-        : 0;
-
-    return profile_ui.YuqiaoPersonalCenter(
-      name: _userName,
-      wordCount: widget.savedWordCount,
-      placeCount: widget.savedPlaceCount,
-      personalObjectCount: widget.savedPersonalObjectCount,
-      locationRecommendationEnabled: widget.locationRecommendationEnabled,
-      personalizedLearningEnabled: widget.personalizedLearningEnabled,
-      onLocationRecommendationChanged: widget.onLocationRecommendationChanged,
-      onPersonalizedLearningChanged: widget.onPersonalizedLearningChanged,
-      onClearPersonalizedLearningData: widget.onClearPersonalizedLearningData,
-      unconfirmedPlaceCount: unconfirmedCount,
-      onNameChanged: (newName) {
-        setState(() => _userName = newName);
-      },
-      onOpenLocationMemory: () {
-        if (controller == null) return;
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => PlaceMemoryManagementPage(
-              controller: controller,
-              onFavoriteSaved: widget.onFavoriteSaved,
-            ),
-          ),
-        );
-      },
-      onOpenPersonalObjects: widget.onOpenPersonalObjects,
-    );
-  }
-
-  Future<void> _confirmClearPlaceData() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('清除地点记录？'),
-        content: const Text('这会删除本机保存的地点和地点词汇使用次数，操作无法撤销。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('清除'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true) widget.onClearPlaceData();
-  }
-
-  // TODO: 调试方法，以后删除
-  Future<void> _showLocationDebugInfo(BuildContext context) async {
-    final ctrl = widget.locationController;
-    if (ctrl == null) return;
-
-    await ctrl.refreshLocationContext(force: true);
-    if (!context.mounted) return;
-
-    final places = ctrl.debugPlaces;
-    final usages = ctrl.debugWordUsages;
-    final currentPlace = ctrl.currentPlace;
-    final currentSemantic = ctrl.currentSemantic;
-    final enabled = ctrl.enabled;
-    final lastError = ctrl.lastLocationError;
-    final recognitionError = ctrl.lastPlaceRecognitionError;
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.7,
-        maxChildSize: 0.9,
-        minChildSize: 0.3,
-        builder: (context, scrollController) => Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          child: ListView(
-            controller: scrollController,
-            padding: const EdgeInsets.all(20),
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[300],
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                '📍 地点数据调试',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 16),
-              _debugSection('状态', [
-                '定位功能：${enabled ? "已开启" : "已关闭"}',
-                '高德识别：${ctrl.automaticPlaceRecognitionAvailable ? "已配置" : "未配置 Key"}',
-                '已记录地点数：${places.length}',
-                '词汇使用记录数：${usages.length}',
-                '当前地点：${currentPlace?.name ?? "无"}',
-                if (currentSemantic != null)
-                  '识别类型：${currentSemantic.type}（${currentSemantic.poiName ?? "无 POI 名称"}）',
-                if (lastError != null) '最后错误：$lastError',
-                if (recognitionError != null) '高德识别错误：$recognitionError',
-              ]),
-              const SizedBox(height: 16),
-              if (places.isEmpty)
-                const Text(
-                  '暂无地点数据。请先在上方开启"地点词汇推荐"，然后使用 App 一段时间后回来查看。',
-                  style: TextStyle(color: Colors.grey, fontSize: 14),
-                ),
-              for (final place in places) ...[
-                _buildPlaceCard(place, usages),
-                const SizedBox(height: 12),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _debugSection(String title, List<String> lines) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF5F5F7),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title,
-              style:
-                  const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 8),
-          for (final line in lines)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Text(line, style: const TextStyle(fontSize: 13)),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPlaceCard(PlaceCluster place, List<PlaceWordUsage> allUsages) {
-    final placeUsages = allUsages.where((u) => u.placeId == place.id).toList()
-      ..sort((a, b) => b.count.compareTo(a.count));
-
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF5F5F7),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(CupertinoIcons.location_fill,
-                  size: 16, color: Color(0xFF267D70)),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  place.name,
-                  style: const TextStyle(
-                      fontSize: 15, fontWeight: FontWeight.w700),
-                ),
-              ),
-              if (place.id == widget.locationController?.currentPlace?.id)
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF34C759).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Text('当前',
-                      style: TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF34C759),
-                          fontWeight: FontWeight.w600)),
-                ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '坐标：${place.latitude.toStringAsFixed(6)}, ${place.longitude.toStringAsFixed(6)}',
-            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-          ),
-          Text(
-            '半径：${place.radiusMeters.round()}m · 访问 ${place.visitCount} 次',
-            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-          ),
-          if (place.placeType != null)
-            Text(
-              '地点类型：${place.placeType} · ${place.poiName ?? "未识别 POI"}',
-              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-            ),
-          Text(
-            '创建：${place.createdAt.toString().substring(0, 19)}',
-            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-          ),
-          if (placeUsages.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            const Text('地点词汇：',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: placeUsages.take(20).map((u) {
-                return Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    '${u.wordText} (${u.count})',
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                );
-              }).toList(),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
   Widget _buildHomePage() {
     return LayoutBuilder(
       builder: (context, constraints) {
+        final systemPadding = MediaQuery.viewPaddingOf(context);
         final height = constraints.maxHeight;
-        final interactionTop = math.max(148.0, height * 0.20);
+        final headerTop = systemPadding.top + 18;
+        final locationTop = systemPadding.top + 86;
+        final interactionTop = math.max(systemPadding.top + 150, height * 0.20);
         return Stack(
           clipBehavior: Clip.none,
           children: [
@@ -637,7 +377,7 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
               ),
             ),
             Positioned(
-              top: 8,
+              top: headerTop,
               left: 24,
               right: 24,
               child: RepaintBoundary(
@@ -646,7 +386,7 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
             ),
             if (widget.locationController != null)
               Positioned(
-                top: 76,
+                top: locationTop,
                 left: 22,
                 right: 22,
                 child: CurrentPlaceStatusCard(
@@ -655,7 +395,7 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
               ),
             Positioned(
               top: interactionTop,
-              bottom: 0,
+              bottom: systemPadding.bottom + 70,
               left: 0,
               right: 0,
               child: Stack(
@@ -758,6 +498,7 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
         child: GestureDetector(
           onPanStart: (_) {
             setState(() {
+              _isDraggingFeatureBubble = true;
               _springingIndex = null;
               _springController.stop();
             });
@@ -776,6 +517,10 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
             } else {
               _runSpringAnimation(releaseOffset, index);
             }
+            _isDraggingFeatureBubble = false;
+          },
+          onPanCancel: () {
+            _isDraggingFeatureBubble = false;
           },
           child: MouseRegion(
             cursor: SystemMouseCursors.click,
@@ -795,6 +540,265 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
       ),
     );
   }
+
+  Widget _buildRehabTrainingEntryPage() {
+    final practiced = _trainingProgress.values
+        .where((item) => item.totalCount > 0)
+        .toList(growable: false);
+    final todayCount =
+        practiced.where((item) => item.practicedOn(DateTime.now())).length;
+    final masteredCount =
+        practiced.where((item) => item.masteryLevel >= 3).length;
+    final dueCount = practiced.where((item) => item.isDueForReview).length;
+    final learningScore = _trainingProgress.values.fold<double>(
+      0,
+      (sum, item) => sum + (item.masteryLevel / 5).clamp(0.0, 1.0),
+    );
+    final progressValue = _trainingWordCount <= 0
+        ? 0.0
+        : (learningScore / _trainingWordCount).clamp(0.0, 1.0);
+
+    return Stack(
+      children: [
+        const Positioned.fill(
+          child: RepaintBoundary(
+            child: LiquidBackgroundDecorations(),
+          ),
+        ),
+        Positioned(
+          top: 72,
+          right: -46,
+          child: _GardenGlowOrb(
+            size: 168,
+            color: const Color(0xFFB8D8BA),
+          ),
+        ),
+        Positioned(
+          bottom: 88,
+          left: -38,
+          child: _GardenGlowOrb(
+            size: 132,
+            color: const Color(0xFFF0D6A8),
+          ),
+        ),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(22, 18, 22, 96),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF7A9E9F).withValues(alpha: .14),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: .72),
+                        ),
+                      ),
+                      child: const Icon(
+                        CupertinoIcons.leaf_arrow_circlepath,
+                        color: Color(0xFF6F9293),
+                        size: 25,
+                      ),
+                    ),
+                    const SizedBox(width: 13),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '词语花园',
+                            style: TextStyle(
+                              fontSize: 34,
+                              height: 1.02,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF2E3038),
+                            ),
+                          ),
+                          SizedBox(height: 4),
+                          Text(
+                            '把常用词一点点养熟',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Color(0xFF7D8490),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 30),
+                Expanded(
+                  child: Center(
+                    child: _TrainingDashboardRing(
+                      progress: progressValue,
+                      todayCount: todayCount,
+                      masteredCount: masteredCount,
+                      dueCount: dueCount,
+                      totalCount: _trainingWordCount,
+                      onTap: () => _openRehabTraining(),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _GardenActionButton(
+                        icon: CupertinoIcons.play_fill,
+                        title: '开始练习',
+                        color: const Color(0xFF7A9E9F),
+                        onTap: () => _openRehabTraining(),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _GardenActionButton(
+                        icon: CupertinoIcons.arrow_counterclockwise_circle_fill,
+                        title: '常错复习',
+                        color: const Color(0xFFD7A86E),
+                        onTap: () => _openRehabTraining(
+                          mode: RehabTrainingMode.weakReview,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _GardenActionButton(
+                        icon: CupertinoIcons.cube_box_fill,
+                        title: '个人物品',
+                        color: const Color(0xFF8D9DC2),
+                        onTap: () => _openRehabTraining(
+                          mode: RehabTrainingMode.personalObjects,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _GardenActionButton(
+                        icon: CupertinoIcons.chart_pie_fill,
+                        title: '学习总结',
+                        color: const Color(0xFFD7A86E),
+                        onTap: _openRehabTrainingSummary,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsPage() {
+    final controller = widget.locationController;
+    final unconfirmedCount = controller != null
+        ? controller.places.where((p) => !p.isUserConfirmed).length
+        : 0;
+
+    return profile_ui.YuqiaoPersonalCenter(
+      name: _userName,
+      wordCount: widget.savedWordCount,
+      placeCount: widget.savedPlaceCount,
+      personalObjectCount: widget.savedPersonalObjectCount,
+      locationRecommendationEnabled: widget.locationRecommendationEnabled,
+      personalizedLearningEnabled: widget.personalizedLearningEnabled,
+      autoStuckDetectionEnabled: widget.autoStuckDetectionEnabled,
+      expressionPreferenceSummary: widget.expressionPreferenceSummary,
+      onLocationRecommendationChanged: widget.onLocationRecommendationChanged,
+      onPersonalizedLearningChanged: widget.onPersonalizedLearningChanged,
+      onAutoStuckDetectionChanged: widget.onAutoStuckDetectionChanged,
+      onOpenExpressionPreferences: widget.onOpenExpressionPreferences,
+      onClearPersonalizedLearningData: widget.onClearPersonalizedLearningData,
+      onOpenLocationMemory: controller == null
+          ? () {}
+          : () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => PlaceMemoryManagementPage(
+                    controller: controller,
+                    onFavoriteSaved: widget.onFavoriteSaved,
+                  ),
+                ),
+              );
+            },
+      onOpenYuqiaoMemory: widget.onOpenYuqiaoMemory,
+      onOpenPersonalObjects: widget.onOpenPersonalObjects,
+      unconfirmedPlaceCount: unconfirmedCount,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        systemNavigationBarColor: Color(0xFFF7F2EA),
+        systemNavigationBarDividerColor: Colors.transparent,
+        systemNavigationBarContrastEnforced: false,
+        statusBarIconBrightness: Brightness.dark,
+        systemNavigationBarIconBrightness: Brightness.dark,
+      ),
+      child: Scaffold(
+        extendBody: true,
+        backgroundColor: const Color(0xFFF7F2EA),
+        body: Stack(
+          children: [
+            Listener(
+              onPointerDown: (event) {
+                _pointerDownX = event.position.dx;
+                _pointerDownY = event.position.dy;
+              },
+              onPointerUp: (event) {
+                if (_isDraggingFeatureBubble) return;
+                final dx = event.position.dx - _pointerDownX;
+                final dy = event.position.dy - _pointerDownY;
+                if (dx.abs() > 80 && dx.abs() > dy.abs() * 2) {
+                  if (dx < 0) {
+                    _goToPage(_currentPage + 1);
+                  } else {
+                    _goToPage(_currentPage - 1);
+                  }
+                }
+              },
+              child: PageView(
+                controller: _pageController,
+                physics: const NeverScrollableScrollPhysics(),
+                onPageChanged: _onPageChanged,
+                children: [
+                  _buildRehabTrainingEntryPage(),
+                  _buildHomePage(),
+                  _buildSettingsPage(),
+                ],
+              ),
+            ),
+            Positioned(
+              left: 28,
+              right: 28,
+              bottom: bottomInset + 8,
+              child: GlassBottomNavigationBar(
+                currentPage: _currentPage,
+                onTap: _goToPage,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class HeaderWidget extends StatelessWidget {
@@ -806,7 +810,7 @@ class HeaderWidget extends StatelessWidget {
     if (hour >= 5 && hour < 11) return '早安';
     if (hour >= 11 && hour < 14) return '午安';
     if (hour >= 14 && hour < 18) return '下午好';
-    return '晚安';
+    return '晚上好';
   }
 
   @override
@@ -1167,7 +1171,7 @@ class PuffyStarPainter extends CustomPainter {
       cy + size.height * 0.012,
     );
 
-    // 稳定的椭圆柔阴影：避免 Android 真机对复杂 Path 阴影的渲染伪影。
+    // 绋冲畾鐨勬き鍦嗘煍闃村奖锛氶伩鍏?Android 鐪熸満瀵瑰鏉?Path 闃村奖鐨勬覆鏌撲吉褰便€?
     final floorShadowPaint = Paint()
       ..color = const Color(0xFFE0A64A).withValues(alpha: 0.18)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14);
@@ -1180,7 +1184,7 @@ class PuffyStarPainter extends CustomPainter {
       floorShadowPaint,
     );
 
-    // 外侧暖色柔光，让星星更立体，但不画刺眼弧线。
+    // 澶栦晶鏆栬壊鏌斿厜锛岃鏄熸槦鏇寸珛浣擄紝浣嗕笉鐢诲埡鐪煎姬绾裤€?
     final outerGlowPaint = Paint()
       ..color = const Color(0xFFFFCF6A).withValues(alpha: 0.22)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
@@ -1188,15 +1192,15 @@ class PuffyStarPainter extends CustomPainter {
 
     final bodyPaint = Paint()
       ..shader = RadialGradient(
-        // 中心偏白，向外逐渐过渡到黄中偏橙，避免整体发淡。
+        // 涓績鍋忕櫧锛屽悜澶栭€愭笎杩囨浮鍒伴粍涓亸姗欙紝閬垮厤鏁翠綋鍙戞贰銆?
         center: Alignment(-0.10 + wave * 0.01, -0.12),
         radius: 0.98,
         colors: const [
-          Color(0xFFFFFEF4), // 中心暖白
-          Color(0xFFFFF2B8), // 浅奶黄
-          Color(0xFFFFD65E), // 明亮黄
-          Color(0xFFFFB43F), // 黄中偏橙
-          Color(0xFFF29B2E), // 边缘橙黄厚度
+          Color(0xFFFFFEF4), // 涓績鏆栫櫧
+          Color(0xFFFFF2B8), // 娴呭ザ榛?
+          Color(0xFFFFD65E), // 鏄庝寒榛?
+          Color(0xFFFFB43F), // 榛勪腑鍋忔
+          Color(0xFFF29B2E), // 杈圭紭姗欓粍鍘氬害
         ],
         stops: const [0.0, 0.18, 0.48, 0.78, 1.0],
       ).createShader(Rect.fromLTWH(0, 0, size.width, size.height))
@@ -1213,7 +1217,7 @@ class PuffyStarPainter extends CustomPainter {
       center: foldCenter,
     );
 
-    // 顶部液态柔光：只保留柔和亮面，不画成明显弧线。
+    // 椤堕儴娑叉€佹煍鍏夛細鍙繚鐣欐煍鍜屼寒闈紝涓嶇敾鎴愭槑鏄惧姬绾裤€?
     final topLightPaint = Paint()
       ..shader = RadialGradient(
         center: const Alignment(-0.28, -0.42),
@@ -1231,7 +1235,7 @@ class PuffyStarPainter extends CustomPainter {
       topLightPaint,
     );
 
-    // 右下方轻微暖阴影，只保留厚度感，不产生脏线。
+    // 鍙充笅鏂硅交寰殩闃村奖锛屽彧淇濈暀鍘氬害鎰燂紝涓嶄骇鐢熻剰绾裤€?
     final lowerShadePaint = Paint()
       ..shader = RadialGradient(
         center: const Alignment(0.48, 0.58),
@@ -1269,8 +1273,8 @@ class PuffyStarPainter extends CustomPainter {
     final outerBase = size.width * 0.425;
     final innerBase = size.width * 0.235;
 
-    // 依然是标准五角星结构：5 个外角 + 5 个内凹点。
-    // 只给很小的比例差，保证灵动但不会变成一团花形。
+    // 渚濈劧鏄爣鍑嗕簲瑙掓槦缁撴瀯锛? 涓瑙?+ 5 涓唴鍑圭偣銆?
+    // 鍙粰寰堝皬鐨勬瘮渚嬪樊锛屼繚璇佺伒鍔ㄤ絾涓嶄細鍙樻垚涓€鍥㈣姳褰€?
     const outerScale = [1.02, 0.98, 1.00, 0.97, 1.03];
     const innerScale = [0.98, 1.02, 0.99, 1.01, 0.98];
 
@@ -1290,7 +1294,7 @@ class PuffyStarPainter extends CustomPainter {
         math.sin(angle) * radius,
       );
 
-      // 只让星星身体向右微倾，脸部保持正向，避免表情跟着歪。
+      // 鍙鏄熸槦韬綋鍚戝彸寰€撅紝鑴搁儴淇濇寔姝ｅ悜锛岄伩鍏嶈〃鎯呰窡鐫€姝€?
       const bodyTilt = 0.15;
       final tiltedPoint = Offset(
         math.cos(bodyTilt) * rawPoint.dx - math.sin(bodyTilt) * rawPoint.dy,
@@ -1312,7 +1316,7 @@ class PuffyStarPainter extends CustomPainter {
     }
 
     final path = Path();
-    // 五个角更圆润：外角加大圆角，内凹点也略微放软。
+    // 浜斾釜瑙掓洿鍦嗘鼎锛氬瑙掑姞澶у渾瑙掞紝鍐呭嚬鐐逛篃鐣ュ井鏀捐蒋銆?
     final outerCorner = size.width * 0.110;
     final innerCorner = size.width * 0.070;
 
@@ -1344,7 +1348,7 @@ class PuffyStarPainter extends CustomPainter {
     required List<Offset> points,
     required Offset center,
   }) {
-    // 这版不再画硬折线。内部折痕改成极淡的软面，避免出现线条阴影。
+    // 杩欑増涓嶅啀鐢荤‖鎶樼嚎銆傚唴閮ㄦ姌鐥曟敼鎴愭瀬娣＄殑杞潰锛岄伩鍏嶅嚭鐜扮嚎鏉￠槾褰便€?
     for (int i = 0; i < 5; i++) {
       final outerIndex = i * 2;
       final leftInner =
@@ -1368,7 +1372,7 @@ class PuffyStarPainter extends CustomPainter {
       canvas.drawPath(facet, facetPaint);
     }
 
-    // 中心泛白：面积略集中，让“中间更淡、更白”，但不形成白圈。
+    // 涓績娉涚櫧锛氶潰绉暐闆嗕腑锛岃鈥滀腑闂存洿娣°€佹洿鐧解€濓紝浣嗕笉褰㈡垚鐧藉湀銆?
     final centerGlowPaint = Paint()
       ..shader = RadialGradient(
         colors: [
@@ -1384,7 +1388,7 @@ class PuffyStarPainter extends CustomPainter {
   }
 
   void _drawLiquidGlassRim(Canvas canvas, Path path) {
-    // 液态玻璃风格白边：外侧柔光 + 清晰白边 + 内侧暖色折射。
+    // 娑叉€佺幓鐠冮鏍肩櫧杈癸細澶栦晶鏌斿厜 + 娓呮櫚鐧借竟 + 鍐呬晶鏆栬壊鎶樺皠銆?
     final outerRimGlowPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 5.4
@@ -1426,7 +1430,7 @@ class PuffyStarPainter extends CustomPainter {
     final eyeGap = size.width * 0.112;
     final eyeRadius = isExcited ? size.width * 0.038 : size.width * 0.034;
 
-    // 眼睛保持两个小黑点。
+    // 鐪肩潧淇濇寔涓や釜灏忛粦鐐广€?
     canvas.drawCircle(Offset(cx - eyeGap, eyeY), eyeRadius, facePaint);
     canvas.drawCircle(Offset(cx + eyeGap, eyeY), eyeRadius, facePaint);
 
@@ -1558,7 +1562,7 @@ class GlassBottomNavigationBar extends StatelessWidget {
   });
 
   static const _icons = [
-    CupertinoIcons.text_bubble,
+    CupertinoIcons.leaf_arrow_circlepath,
     CupertinoIcons.house_fill,
     CupertinoIcons.person,
   ];
@@ -1585,7 +1589,7 @@ class GlassBottomNavigationBar extends StatelessWidget {
             return Stack(
               clipBehavior: Clip.none,
               children: [
-                // 滑动的液态玻璃椭圆指示器（纯背景，无图标）
+                // 婊戝姩鐨勬恫鎬佺幓鐠冩き鍦嗘寚绀哄櫒锛堢函鑳屾櫙锛屾棤鍥炬爣锛?
                 Positioned(
                   top: (62 - indicatorHeight) / 2,
                   left: (itemWidth - indicatorWidth) / 2,
@@ -1615,7 +1619,7 @@ class GlassBottomNavigationBar extends StatelessWidget {
                     ),
                   ),
                 ),
-                // 三个图标（始终可见）
+                // 涓変釜鍥炬爣锛堝缁堝彲瑙侊級
                 Positioned.fill(
                   child: Row(
                     children: List.generate(3, (index) {
@@ -1647,102 +1651,434 @@ class GlassBottomNavigationBar extends StatelessWidget {
   }
 }
 
-class FeatureDetailPage extends StatelessWidget {
-  final FeatureConfig feature;
+class _GardenActionButton extends StatelessWidget {
+  const _GardenActionButton({
+    required this.icon,
+    required this.title,
+    required this.color,
+    required this.onTap,
+  });
 
-  const FeatureDetailPage({super.key, required this.feature});
+  final IconData icon;
+  final String title;
+  final Color color;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFFFF2D3),
-      body: Container(
-        decoration: const BoxDecoration(
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 76,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: .62),
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: Colors.white.withValues(alpha: .76)),
+          boxShadow: [
+            BoxShadow(
+              color: color.withValues(alpha: .14),
+              blurRadius: 18,
+              offset: const Offset(0, 10),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: .16),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: color, size: 20),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF2E3038),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TrainingDashboardRing extends StatelessWidget {
+  const _TrainingDashboardRing({
+    required this.progress,
+    required this.todayCount,
+    required this.masteredCount,
+    required this.dueCount,
+    required this.totalCount,
+    required this.onTap,
+  });
+
+  final double progress;
+  final int todayCount;
+  final int masteredCount;
+  final int dueCount;
+  final int totalCount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final targetProgress = progress.clamp(0.0, 1.0);
+    final isComplete = totalCount > 0 && masteredCount >= totalCount;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: SizedBox(
+        width: 270,
+        height: 270,
+        child: CustomPaint(
+          painter: _TrainingRingPainter(
+            progress: targetProgress,
+            isComplete: isComplete,
+          ),
+          child: Center(
+            child: Container(
+              width: 196,
+              height: 196,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withValues(alpha: .72),
+                border: Border.all(color: Colors.white.withValues(alpha: .84)),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF7A9E9F).withValues(alpha: .14),
+                    blurRadius: 28,
+                    offset: const Offset(0, 14),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    '${(targetProgress * 100).round()}%',
+                    style: const TextStyle(
+                      fontSize: 46,
+                      height: .95,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF2E3038),
+                    ),
+                  ),
+                  const SizedBox(height: 7),
+                  Text(
+                    totalCount <= 0
+                        ? '还没有词汇'
+                        : '已掌握 $masteredCount / $totalCount',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF6F9293),
+                    ),
+                  ),
+                  const SizedBox(height: 15),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _RingMetric(label: '今日', value: '$todayCount'),
+                      Container(
+                        width: 1,
+                        height: 28,
+                        margin: const EdgeInsets.symmetric(horizontal: 12),
+                        color: const Color(0xFFE0E4EA),
+                      ),
+                      _RingMetric(label: '复习', value: '$dueCount'),
+                    ],
+                  ),
+                  const SizedBox(height: 11),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF7A9E9F).withValues(alpha: .10),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Text(
+                      '轻点开始练习',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF6F9293),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RingMetric extends StatelessWidget {
+  const _RingMetric({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 18,
+            height: 1,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFF2E3038),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF8A8D98),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TrainingRingPainter extends CustomPainter {
+  const _TrainingRingPainter({
+    required this.progress,
+    required this.isComplete,
+  });
+
+  final double progress;
+  final bool isComplete;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = math.min(size.width, size.height) / 2 - 16;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+    final safeProgress = isComplete ? 1.0 : progress.clamp(0.0, 1.0);
+    final basePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 18
+      ..strokeCap = StrokeCap.round
+      ..color = Colors.white.withValues(alpha: .62);
+    canvas.drawCircle(center, radius, basePaint);
+
+    final progressPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 18
+      ..strokeCap = StrokeCap.round
+      ..shader = const LinearGradient(
+        colors: [
+          Color(0xFF7A9E9F),
+          Color(0xFFD7A86E),
+          Color(0xFFD7A0A9),
+        ],
+      ).createShader(rect);
+    if (safeProgress >= .999) {
+      canvas.drawCircle(center, radius, progressPaint);
+    } else if (safeProgress > 0) {
+      canvas.drawArc(
+        rect,
+        -math.pi / 2,
+        math.pi * 2 * safeProgress,
+        false,
+        progressPaint,
+      );
+    }
+
+    final dotBasePaint = Paint()..color = Colors.white.withValues(alpha: .84);
+    for (var i = 0; i < 8; i++) {
+      final angle = -math.pi / 2 + math.pi * 2 * (i / 8);
+      final point = center +
+          Offset(
+            math.cos(angle) * radius,
+            math.sin(angle) * radius,
+          );
+      canvas.drawCircle(
+        point,
+        4.3,
+        dotBasePaint,
+      );
+    }
+
+    if (safeProgress > 0) {
+      final endAngle = -math.pi / 2 + math.pi * 2 * safeProgress;
+      final endPoint = center +
+          Offset(
+            math.cos(endAngle) * radius,
+            math.sin(endAngle) * radius,
+          );
+      canvas.drawCircle(
+        endPoint,
+        7.0,
+        Paint()..color = Colors.white.withValues(alpha: .92),
+      );
+      canvas.drawCircle(
+        endPoint,
+        4.8,
+        Paint()..color = const Color(0xFF7A9E9F),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TrainingRingPainter oldDelegate) {
+    return oldDelegate.progress != progress ||
+        oldDelegate.isComplete != isComplete;
+  }
+}
+
+class _GardenGlowOrb extends StatelessWidget {
+  const _GardenGlowOrb({
+    required this.size,
+    required this.color,
+  });
+
+  final double size;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: RadialGradient(
+            colors: [
+              color.withValues(alpha: .22),
+              color.withValues(alpha: .08),
+              color.withValues(alpha: 0),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class FeatureDetailPage extends StatelessWidget {
+  final FeatureConfig feature;
+  final VoidCallback onClose;
+
+  const FeatureDetailPage({
+    super.key,
+    required this.feature,
+    required this.onClose,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0xFFFFF8EA), Color(0xFFFFE9C1), Color(0xFFFDE1BD)],
+            colors: [
+              feature.color.withValues(alpha: 0.16),
+              const Color(0xFFFFF8EA),
+              const Color(0xFFEAF4FF),
+            ],
           ),
         ),
         child: SafeArea(
-          child: Stack(
-            children: [
-              const Positioned.fill(child: SoftBackgroundDecorations()),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _GlassIconButton(
-                      icon: CupertinoIcons.chevron_left,
-                      onTap: () => Navigator.of(context).pop(),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _GlassIconButton(
+                  icon: CupertinoIcons.chevron_left,
+                  onTap: onClose,
+                ),
+                const SizedBox(height: 32),
+                Center(
+                  child: Icon(feature.icon, size: 82, color: feature.color),
+                ),
+                const SizedBox(height: 32),
+                Center(
+                  child: Text(
+                    feature.label,
+                    style: const TextStyle(
+                      fontSize: 36,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF3E3121),
                     ),
-                    const SizedBox(height: 42),
-                    Center(
-                      child: GlassFeatureIcon(
-                        icon: feature.icon,
-                        color: feature.color,
-                      ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Center(
+                  child: Text(
+                    '轻点${feature.label}开始使用',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFF8F7A65),
                     ),
-                    const SizedBox(height: 32),
-                    Center(
-                      child: Text(
-                        feature.label,
-                        style: const TextStyle(
-                          fontSize: 36,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFF3E3121),
+                  ),
+                ),
+                const SizedBox(height: 32),
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(32),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(26),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.34),
+                          borderRadius: BorderRadius.circular(32),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.7),
+                            width: 1.4,
+                          ),
                         ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Center(
-                      child: Text(
-                        '这里是「${feature.label}」功能界面',
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w500,
-                          color: Color(0xFF8F7A65),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 32),
-                    Expanded(
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(32),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                          child: Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(26),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: 0.34),
-                              borderRadius: BorderRadius.circular(32),
-                              border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.7),
-                                width: 1.4,
-                              ),
-                            ),
-                            child: Center(
-                              child: Text(
-                                _featureDescription(feature.label),
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  fontSize: 17,
-                                  height: 1.65,
-                                  fontWeight: FontWeight.w600,
-                                  color: Color(0xFF6B5A49),
-                                ),
-                              ),
+                        child: Center(
+                          child: Text(
+                            _featureDescription(feature.label),
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 17,
+                              height: 1.65,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF6B5A49),
                             ),
                           ),
                         ),
                       ),
                     ),
-                  ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -1751,16 +2087,16 @@ class FeatureDetailPage extends StatelessWidget {
 
   String _featureDescription(String label) {
     switch (label) {
-      case '聊天':
-        return '可以在这里接入 AI 对话、语音输入、聊天记录、智能陪伴等功能。';
+      case '补词':
+        return '选择表达方向和关键词，语桥会整理成可确认、可播报的句子。';
       case '拍照':
-        return '可以在这里接入相机、相册上传、图片识别、拍照分析等功能。';
-      case '日程':
-        return '可以在这里接入日历、待办事项、提醒、每日计划等功能。';
-      case '工具':
-        return '可以在这里接入快捷工具、智能模板、效率组件、常用入口等功能。';
+        return '拍下眼前物品，语桥会识别内容并给出更贴近场景的表达。';
+      case '对话':
+        return '记录当前对话语境，帮助理解对方的话，也在卡住时给出表达提示。';
+      case '词库':
+        return '整理常用表达、图文词汇和个人物品，让表达选择越来越贴近自己。';
       default:
-        return '这是一个预留功能页面。';
+        return '选择一个功能入口开始使用。';
     }
   }
 }

@@ -24,6 +24,12 @@ typedef XfyunTranscriptCallback = void Function(XfyunTranscriptEvent event);
 typedef XfyunStatusCallback = void Function(String status);
 typedef XfyunErrorCallback = void Function(String message);
 
+const bool kXfyunAsrDebugLogs = false;
+
+void _xfyunDebugLog(String message) {
+  if (kXfyunAsrDebugLogs) debugPrint(message);
+}
+
 class XfyunRealtimeAsrService {
   static const String _appId = String.fromEnvironment('XFYUN_APP_ID');
   static const String _apiKey = String.fromEnvironment('XFYUN_API_KEY');
@@ -121,7 +127,7 @@ class XfyunRealtimeAsrService {
         cancelOnError: false,
       );
       _onStatus?.call('正在聆听并区分说话者');
-      debugPrint('[Xfyun ASR] streaming request=$_requestId');
+      _xfyunDebugLog('[Xfyun ASR] streaming request=$_requestId');
     } catch (error) {
       await _cleanup();
       if (error is XfyunAsrException) rethrow;
@@ -137,7 +143,7 @@ class XfyunRealtimeAsrService {
     try {
       await _recorder.stop();
     } catch (error) {
-      debugPrint('[Xfyun ASR] recorder stop failed: $error');
+      _xfyunDebugLog('[Xfyun ASR] recorder stop failed: $error');
     }
     await _audioSubscription?.cancel();
     _audioSubscription = null;
@@ -184,7 +190,7 @@ class XfyunRealtimeAsrService {
       final event =
           decoded['action']?.toString() ?? decoded['msg_type']?.toString();
       final code = decoded['code']?.toString();
-      debugPrint('[Xfyun ASR] event=$event code=$code');
+      _xfyunDebugLog('[Xfyun ASR] event=$event code=$code');
 
       if (event == 'error' || (code != null && code != '0')) {
         final message = decoded['desc']?.toString() ?? raw;
@@ -209,7 +215,7 @@ class XfyunRealtimeAsrService {
         _finished!.complete();
       }
     } catch (error) {
-      debugPrint('[Xfyun ASR] invalid message: $error');
+      _xfyunDebugLog('[Xfyun ASR] invalid message: $error');
     }
   }
 
@@ -325,7 +331,7 @@ class XfyunRealtimeAsrService {
 
   void _fail(String message) {
     if (!_active || _stopping) return;
-    debugPrint('[Xfyun ASR] $message');
+    _xfyunDebugLog('[Xfyun ASR] $message');
     _onError?.call(message);
     unawaited(_cleanup());
   }

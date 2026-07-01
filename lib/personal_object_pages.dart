@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'app_icons.dart';
 import 'personal_objects.dart';
 
 class PersonalObjectEditSheet extends StatefulWidget {
@@ -13,9 +14,11 @@ class PersonalObjectEditSheet extends StatefulWidget {
     required this.initialExpressions,
     this.initialNote = '',
     this.title = '记住这个物品',
+    this.submitLabel = '保存个人物品',
   });
 
   final String title;
+  final String submitLabel;
   final String initialName;
   final String initialCategory;
   final String initialDescription;
@@ -167,11 +170,13 @@ class _PersonalObjectEditSheetState extends State<PersonalObjectEditSheet> {
                   height: 52,
                   child: FilledButton.icon(
                     onPressed: _submit,
-                    icon: const Icon(Icons.check_rounded),
-                    label: const Text(
-                      '保存个人物品',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                    icon: const Icon(YuqiaoIcons.check),
+                    label: Text(
+                      widget.submitLabel,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
                 ),
@@ -271,6 +276,7 @@ class _PersonalObjectManagementPageState
       backgroundColor: Colors.transparent,
       builder: (_) => PersonalObjectEditSheet(
         title: '编辑个人物品',
+        submitLabel: '保存修改',
         initialName: object.displayName,
         initialCategory: object.category,
         initialDescription: object.visualDescription,
@@ -319,7 +325,7 @@ class _PersonalObjectManagementPageState
           IconButton(
             tooltip: '拍照添加',
             onPressed: _add,
-            icon: const Icon(Icons.add_a_photo_rounded),
+            icon: const Icon(YuqiaoIcons.addPhoto),
           ),
         ],
       ),
@@ -353,8 +359,7 @@ class _PersonalObjectManagementPageState
                                       ? Image.file(imageFile, fit: BoxFit.cover)
                                       : const ColoredBox(
                                           color: Color(0xFFE8EBF2),
-                                          child:
-                                              Icon(Icons.inventory_2_rounded),
+                                          child: Icon(YuqiaoIcons.object),
                                         ),
                                 ),
                               ),
@@ -431,7 +436,7 @@ class _EmptyPersonalObjects extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Icon(
-              Icons.inventory_2_outlined,
+              YuqiaoIcons.objectOutline,
               size: 54,
               color: Color(0xFF7A93FF),
             ),
@@ -449,7 +454,7 @@ class _EmptyPersonalObjects extends StatelessWidget {
             const SizedBox(height: 20),
             FilledButton.icon(
               onPressed: onAdd,
-              icon: const Icon(Icons.camera_alt_rounded),
+              icon: const Icon(YuqiaoIcons.camera),
               label: const Text('拍照添加'),
             ),
           ],

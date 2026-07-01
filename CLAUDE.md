@@ -33,7 +33,7 @@ flutter clean
 ## Environment Variables (via --dart-define)
 
 | Variable | Default | Purpose |
-|----------|---------|---------|
+| --- | --- | --- |
 | `QWEN_API_KEY` | *(required)* | API key for Qwen (通义千问) via DashScope — also used for Paraformer ASR |
 | `QWEN_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | Chat API endpoint |
 | `QWEN_TEXT_MODEL` | `qwen-plus` | Model for sentence generation |
@@ -46,38 +46,56 @@ Never hardcode API keys in source files. Pass them via `--dart-define` at runtim
 
 ### File Structure
 
-- **`lib/main.dart`** — The monolithic core (~9900 lines). Contains all pages, widgets, data models, services, design tokens, and local storage logic. This is the primary file to work in.
+- **`lib/main.dart`** — The monolithic core (~14000 lines). Contains all pages, widgets, data models, services, design tokens, and local storage logic. This is the primary file to work in.
 - **`lib/star_home.dart`** — The animated home screen with draggable glass bubbles for feature navigation, PageView with 3 pages (home, 补词, 我的), sliding tab indicator. Imported by `main.dart` as `star_ui`.
 - **`lib/my_test.dart`** — Profile/settings page ("我的"). Contains `YuqiaoPersonalCenter`, `ProfileHeroCard`, `_ProfileSettingsPage` (avatar/background/nickname editor), `_CategoryDetailPage` (vocabulary detail with TTS), category style editor. Imported by `star_home.dart` as `profile_ui`.
 - **`lib/voice_orb_test_page.dart`** — Exports `VoiceOrbPainter` and `VoiceDotsIndicator` (CustomPaint voice visualization). Imported by `main.dart`.
-- **`lib/paraformer_asr_service.dart`** — DashScope Paraformer real-time ASR via WebSocket. Used by conversation mode. Streams PCM audio, returns partial/final transcripts.
+- **`lib/paraformer_asr_service.dart`** — DashScope Paraformer real-time ASR via WebSocket. Used by vocabulary search. Streams PCM audio, returns partial/final transcripts.
+- **`lib/xfyun_realtime_asr_service.dart`** — iFlytek (讯飞) real-time ASR via WebSocket with speaker diarization support. Used by conversation mode.
 - **`lib/location_recommendation.dart`** — `LocationRecommendationController` for location-based word recommendation. Tracks places, word usage per place, integrates with Amap semantic API.
 - **`lib/location_memory_pages.dart`** — Place memory management UI (`PlaceMemoryManagementPage`, `CurrentPlaceStatusCard`).
 - **`lib/personal_objects.dart`** / **`lib/personal_object_pages.dart`** — Personal object management (user's custom items).
+- **`lib/personal_object_match_policy.dart`** — Matching logic for personal objects during camera recognition.
+- **`lib/camera_image_processing.dart`** — Camera image processing utilities.
+- **`lib/conversation_terms.dart`** — Special term extraction from conversation transcripts (names, places, institutions).
+- **`lib/conversation_feedback.dart`** — Conversation feedback tracking for word preference learning.
+- **`lib/expression_habits.dart`** — User expression habit tracking.
+- **`lib/stuck_expression_flow.dart`** — Stuck flow expression logic.
+- **`lib/local_object_locator.dart`** — Local object location matching.
 - **`CamerAwesome-master/`** — Vendored camera plugin. Do not modify unless intentionally fixing the plugin.
 - **`android/`** — Standard Flutter Android shell with Gradle KTS build scripts. Uses Aliyun mirrors.
 
 ### Key Classes in `lib/main.dart`
 
 | Class | Role |
-|-------|------|
+| --- | --- |
 | `YuqiaoApp` | Root widget, manages global state (recent expressions, favorites, vocabulary) |
 | `HomePage` | Delegates to `MainInterfaceScreen` from `star_home.dart` |
 | `StuckFlowPage` | The "我卡住了" multi-step flow: intent → word selection → AI sentence candidates |
 | `AiCandidatesPage` | Displays AI-generated sentence candidates with colorful gradient UI |
 | `ConfirmSpeakPage` | Final confirmation + TTS playback |
 | `CameraWordPage` | Photo-based object recognition with bounding box annotations |
-| `ConversationModePage` | Real-time ASR (Paraformer) with voice orb, sliding tabs, word suggestions |
+| `ConversationModePage` | Real-time ASR (iFlytek) with voice orb, sliding tabs, word suggestions, speaker diarization |
 | `VocabularyPage` | Personal dictionary with category grid, search (text + voice), TTS, frequency sorting |
 | `QwenService` | All AI API calls: sentence generation, recommendation, conversation, object recognition |
 | `LocalStore` | SharedPreferences wrapper for persistence |
 | `ParaformerAsrService` | Real-time ASR via DashScope WebSocket (in `paraformer_asr_service.dart`) |
+| `XfyunRealtimeAsrService` | Real-time ASR via iFlytek WebSocket with speaker diarization (in `xfyun_realtime_asr_service.dart`) |
+
+### ASR Architecture
+
+The app uses two ASR services for different purposes:
+
+1. **iFlytek (讯飞)** — Used by conversation mode for real-time speech recognition with speaker diarization (`ptt=1`). Connects via WebSocket, streams PCM 16-bit 16kHz audio, returns transcripts with speaker labels.
+2. **DashScope Paraformer** — Used by vocabulary search for short-voice input. Simpler WebSocket-based ASR without speaker separation.
+
+Both services use the same `record` package for audio capture.
 
 ### Data Flow
 
 1. **Expression flow (StuckFlowPage):** User picks intent → iterates through ChoiceSteps → each step calls `QwenService.recommendNextOptions()` → builds `ExpressionDraft` → `AiCandidatesPage` generates sentences → user picks → `ConfirmSpeakPage` speaks via FlutterTts
 2. **Camera flow (CameraWordPage):** User takes photo → `QwenService.recognizeObject()` returns objects with bounding boxes and expressions → user taps expression → flows into AiCandidatesPage
-3. **Conversation flow (ConversationModePage):** Paraformer ASR streams transcripts → on pause or "我卡住了" → `QwenService.recommendConversationOptions()` → user selects → flows into AiCandidatesPage
+3. **Conversation flow (ConversationModePage):** iFlytek ASR streams transcripts with speaker labels → on pause or "我卡住了" → `QwenService.recommendConversationOptions()` → user selects → flows into AiCandidatesPage
 4. **Vocabulary flow:** Category grid → detail page with TTS playback → search (text + voice via ParaformerAsrService) → frequency-sorted results
 
 ### Design System
@@ -114,16 +132,6 @@ Popup dialogs (suggestions, new category, ASR transcript) use a consistent color
 - `use_build_context_synchronously: true` is enforced — always check `mounted` before using context after async gaps
 - `withValues(alpha:)` is preferred over the deprecated `withOpacity()`
 
-## ASR Architecture
-
-The app uses DashScope Paraformer for real-time speech recognition:
-
-- `ParaformerAsrService` connects via WebSocket to `wss://dashscope.aliyuncs.com/api-ws/v1/inference`
-- Streams PCM 16-bit 16kHz audio via the `record` package
-- Returns partial and final transcripts
-- Same API key (`QWEN_API_KEY`) is used for both chat and ASR
-- Conversation mode falls back to a recording-based approach if WebSocket fails
-
 ## Android Build Configuration
 
 - `compileSdk = 36` (required by dependencies)
@@ -145,10 +153,6 @@ Verify Aliyun mirrors are configured in `settings.gradle.kts` and `build.gradle.
 ### Gradle lock timeout
 
 Run `android/gradlew.bat --stop` to kill stale Gradle daemons.
-
-### `speech_to_text` error_busy on Huawei
-
-Huawei's system speech service doesn't work reliably with the `speech_to_text` plugin. The app uses Paraformer ASR (DashScope WebSocket) as the primary ASR instead.
 
 ### `image_cropper` compileSdk error
 

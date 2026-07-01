@@ -136,8 +136,9 @@ class PersonalObjectStore {
     final id = 'personal_object_${now.microsecondsSinceEpoch}';
     final directory = await _objectDirectory();
     final imagePath = '${directory.path}${Platform.pathSeparator}$id.jpg';
+    final imageInput = Uint8List.fromList(referenceImageBytes);
     final optimizedBytes = await Isolate.run(
-      () => _optimizeReferenceImage(referenceImageBytes),
+      () => _optimizeReferenceImage(imageInput),
     );
     await File(imagePath).writeAsBytes(optimizedBytes, flush: true);
     final object = PersonalObject(

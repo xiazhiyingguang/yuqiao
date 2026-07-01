@@ -174,9 +174,10 @@ class StuckFlowCatalog {
         RegExp(r'一点|轻微|比较|很|非常|严重|明显|越来越|不太').hasMatch(clean),
       StuckExpressionSlot.action =>
         RegExp(r'找|拿|打开|关闭|关上|去|回|吃|喝|休息|陪|说|看|买|用|告诉|完成|弄|等').hasMatch(clean),
-      StuckExpressionSlot.helper => RegExp(
-          r'妈妈|爸爸|家人|朋友|老师|医生|护士|工作人员|同事|治疗师|他|她|你',
-        ).hasMatch(clean),
+      StuckExpressionSlot.helper => clean.length <= 8 &&
+          !RegExp(r'^(我想|我要|请|帮我|能不能|可以|麻烦|是不是|哪里|怎么)').hasMatch(clean) &&
+          RegExp(r'妈妈|爸爸|家人|朋友|老师|医生|护士|工作人员|同事|治疗师|身边的人|照顾者|护工|他|她|你$')
+              .hasMatch(clean),
       StuckExpressionSlot.communication =>
         RegExp(r'帮我|请|你|哪里|怎么|自己|不用').hasMatch(clean),
       StuckExpressionSlot.target ||

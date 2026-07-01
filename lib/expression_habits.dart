@@ -170,10 +170,10 @@ class ExpressionHabitStore {
   Future<List<ExpressionHabit>> loadAll() async {
     final preferences = await SharedPreferences.getInstance();
     final raw = preferences.getString(_storageKey);
-    if (raw == null || raw.isEmpty) return const [];
+    if (raw == null || raw.isEmpty) return <ExpressionHabit>[];
     try {
       final decoded = jsonDecode(raw);
-      if (decoded is! List) return const [];
+      if (decoded is! List) return <ExpressionHabit>[];
       return decoded
           .whereType<Map>()
           .map((item) => ExpressionHabit.fromJson(
@@ -183,7 +183,7 @@ class ExpressionHabitStore {
           .toList()
         ..sort((a, b) => b.lastUsedAt.compareTo(a.lastUsedAt));
     } catch (_) {
-      return const [];
+      return <ExpressionHabit>[];
     }
   }
 
@@ -200,7 +200,7 @@ class ExpressionHabitStore {
     if (clean.isEmpty || normalized.isEmpty) return;
     final now = usedAt ?? DateTime.now();
     final timeBucket = bucketFor(now);
-    final habits = await loadAll();
+    final habits = List<ExpressionHabit>.of(await loadAll());
     final index =
         habits.indexWhere((habit) => habit.normalizedText == normalized);
 

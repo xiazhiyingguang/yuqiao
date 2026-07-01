@@ -6,7 +6,7 @@ import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:camerawesome/camerawesome_plugin.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -14,12 +14,14 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'companion_agent.dart';
 import 'conversation_terms.dart';
 import 'camera_image_processing.dart';
 import 'conversation_feedback.dart';
 import 'expression_habits.dart';
 import 'local_object_locator.dart';
 import 'location_recommendation.dart';
+import 'memory_insights_page.dart';
 import 'paraformer_asr_service.dart';
 import 'personal_object_match_policy.dart';
 import 'personal_object_pages.dart';
@@ -39,7 +41,67 @@ typedef HabitRecordCallback = Future<void> Function(
 typedef VocabularyChangedCallback = Future<void> Function(
     List<VocabularyEntry> entries);
 
+const bool kYuqiaoDebugLogs = false;
+
+const SystemUiOverlayStyle kYuqiaoSystemUiStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  systemNavigationBarColor: Color(0xFFF7F2EA),
+  systemNavigationBarDividerColor: Colors.transparent,
+  systemNavigationBarContrastEnforced: false,
+  statusBarIconBrightness: Brightness.dark,
+  systemNavigationBarIconBrightness: Brightness.dark,
+);
+
+void yuqiaoDebugLog(String message) {
+  if (kYuqiaoDebugLogs) debugPrint(message);
+}
+
+class ExpressionPreference {
+  const ExpressionPreference({
+    this.preferredCandidateCount = 2,
+    this.displayMode = 'mixed',
+  });
+
+  final int preferredCandidateCount;
+  final String displayMode;
+
+  int get effectiveCandidateCount =>
+      preferredCandidateCount.clamp(2, 6).toInt();
+
+  String get summary {
+    final countLabel = switch (effectiveCandidateCount) {
+      2 => '少',
+      4 => '标准',
+      6 => '多',
+      _ => '$effectiveCandidateCount 个',
+    };
+    final modeLabel = switch (displayMode) {
+      'largeText' => '大文字',
+      'imageFirst' => '图片优先',
+      _ => '图文一起',
+    };
+    return '$countLabel · $modeLabel';
+  }
+
+  Map<String, dynamic> toJson() => {
+        'preferredCandidateCount': effectiveCandidateCount,
+        'displayMode': displayMode,
+      };
+
+  static ExpressionPreference fromJson(Map<String, dynamic> json) {
+    final count = json['preferredCandidateCount'];
+    final mode = json['displayMode'];
+    return ExpressionPreference(
+      preferredCandidateCount: count is int ? count.clamp(2, 6).toInt() : 2,
+      displayMode: mode is String && mode.isNotEmpty ? mode : 'mixed',
+    );
+  }
+}
+
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(kYuqiaoSystemUiStyle);
   runApp(const YuqiaoApp());
 }
 
@@ -56,19 +118,26 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
   final ExpressionHabitStore _habitStore = ExpressionHabitStore();
   final PersonalObjectStore _personalObjectStore = PersonalObjectStore();
   late final LocationRecommendationController _locationController;
+  late final CompanionAgentController _companionAgent;
   bool _locationInitialized = false;
   bool _personalizedLearningEnabled = true;
+  bool _autoStuckDetectionEnabled = false;
+  ExpressionPreference _expressionPreference = const ExpressionPreference();
   List<String> _recentExpressions = const [];
   List<String> _favoriteExpressions = const [];
   List<ExpressionHabit> _expressionHabits = const [];
   List<VocabularyEntry> _vocabularyEntries = const [];
   List<PersonalObject> _personalObjects = const [];
+  List<ConversationTerm> _conversationTerms = const [];
 
   @override
   void initState() {
     super.initState();
     _locationController = LocationRecommendationController(store: _store)
       ..addListener(_handleLocationChanged);
+    _companionAgent = CompanionAgentController(
+      locationController: _locationController,
+    );
     _loadLocalData();
   }
 
@@ -84,15 +153,37 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
     if (mounted) setState(() {});
   }
 
+  void _syncCompanionMemory({
+    List<String>? recentExpressions,
+    List<String>? favoriteExpressions,
+    List<ExpressionHabit>? expressionHabits,
+    List<PersonalObject>? personalObjects,
+    List<ConversationTerm>? conversationTerms,
+    bool? learningEnabled,
+  }) {
+    _companionAgent.updateMemory(
+      recentExpressions: recentExpressions ?? _recentExpressions,
+      favoriteExpressions: favoriteExpressions ?? _favoriteExpressions,
+      expressionHabits: expressionHabits ?? _expressionHabits,
+      personalObjects: personalObjects ?? _personalObjects,
+      conversationTerms: conversationTerms ?? _conversationTerms,
+      learningEnabled: learningEnabled ?? _personalizedLearningEnabled,
+    );
+  }
+
   Future<void> _loadLocalData() async {
     final recent = await _store.loadRecentExpressions();
     final favorites = await _store.loadFavoriteExpressions();
+    final expressionPreference = await _store.loadExpressionPreference();
+    final autoStuckDetectionEnabled =
+        await _store.loadAutoStuckDetectionEnabled();
     final personalizedLearningEnabled = await _habitStore.loadEnabled();
     final List<ExpressionHabit> habits = personalizedLearningEnabled
         ? await _habitStore.loadAll()
         : const <ExpressionHabit>[];
     final vocabulary = await _store.loadVocabularyEntries();
     final personalObjects = await _personalObjectStore.loadAll();
+    final conversationTerms = await ConversationTermStore().loadAll();
     final baseVocabulary =
         vocabulary.isEmpty ? VocabularyDefaults.entries : vocabulary;
     final personalById = {
@@ -128,14 +219,25 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
       _locationController.updateFavoriteWords(effectiveFavorites);
     }
     _locationController.updateExpressionHabits(habits, notify: false);
+    _syncCompanionMemory(
+      recentExpressions: recent,
+      favoriteExpressions: effectiveFavorites,
+      expressionHabits: habits,
+      personalObjects: personalObjects,
+      conversationTerms: conversationTerms,
+      learningEnabled: personalizedLearningEnabled,
+    );
     if (!mounted) return;
     setState(() {
       _recentExpressions = recent;
       _favoriteExpressions = effectiveFavorites;
       _personalizedLearningEnabled = personalizedLearningEnabled;
+      _autoStuckDetectionEnabled = autoStuckDetectionEnabled;
+      _expressionPreference = expressionPreference;
       _expressionHabits = habits;
       _vocabularyEntries = synchronizedVocabulary;
       _personalObjects = personalObjects;
+      _conversationTerms = conversationTerms;
     });
   }
 
@@ -178,6 +280,7 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
     );
     final habits = await _habitStore.loadAll();
     _locationController.updateExpressionHabits(habits, notify: false);
+    _syncCompanionMemory(expressionHabits: habits);
     if (!mounted) return;
     setState(() => _expressionHabits = habits);
   }
@@ -187,6 +290,10 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
     final List<ExpressionHabit> habits =
         enabled ? await _habitStore.loadAll() : const <ExpressionHabit>[];
     _locationController.updateExpressionHabits(habits, notify: false);
+    _syncCompanionMemory(
+      expressionHabits: habits,
+      learningEnabled: enabled,
+    );
     if (!mounted) return;
     setState(() {
       _personalizedLearningEnabled = enabled;
@@ -194,9 +301,24 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
     });
   }
 
+  Future<void> _setAutoStuckDetectionEnabled(bool enabled) async {
+    await _store.saveAutoStuckDetectionEnabled(enabled);
+    if (!mounted) return;
+    setState(() => _autoStuckDetectionEnabled = enabled);
+  }
+
+  Future<void> _saveExpressionPreference(
+    ExpressionPreference preference,
+  ) async {
+    await _store.saveExpressionPreference(preference);
+    if (!mounted) return;
+    setState(() => _expressionPreference = preference);
+  }
+
   Future<void> _clearExpressionHabits() async {
     await _habitStore.clearAll();
     _locationController.updateExpressionHabits(const [], notify: false);
+    _syncCompanionMemory(expressionHabits: const []);
     if (!mounted) return;
     setState(() => _expressionHabits = const []);
   }
@@ -208,31 +330,48 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: '语桥',
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: AppColors.background,
-        colorScheme: ColorScheme.fromSeed(seedColor: AppColors.primary),
-      ),
-      home: HomePage(
-        qwenService: _qwenService,
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: kYuqiaoSystemUiStyle,
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: '语桥',
+        theme: ThemeData(
+          useMaterial3: true,
+          scaffoldBackgroundColor: AppColors.background,
+          colorScheme: ColorScheme.fromSeed(seedColor: AppColors.primary),
+        ),
+        builder: (context, child) {
+          return AnnotatedRegion<SystemUiOverlayStyle>(
+            value: kYuqiaoSystemUiStyle,
+            child: ColoredBox(
+              color: const Color(0xFFF7F2EA),
+              child: child ?? const SizedBox.shrink(),
+            ),
+          );
+        },
+        home: HomePage(
+          qwenService: _qwenService,
         locationController: _locationController,
+        companionAgent: _companionAgent,
         personalizedLearningEnabled: _personalizedLearningEnabled,
-        recentExpressions: _recentExpressions,
-        favoriteExpressions: _favoriteExpressions,
-        expressionHabits: _expressionHabits,
-        vocabularyEntries: _vocabularyEntries,
-        personalObjects: _personalObjects,
-        personalObjectStore: _personalObjectStore,
-        onExpressionCompleted: _recordExpression,
-        onFavoriteSaved: _saveFavorite,
-        onHabitRecorded: _recordHabit,
-        onPersonalizedLearningChanged: _setPersonalizedLearningEnabled,
-        onClearPersonalizedLearningData: _clearExpressionHabits,
-        onVocabularyChanged: _saveVocabulary,
-        onPersonalObjectsChanged: _loadLocalData,
+          autoStuckDetectionEnabled: _autoStuckDetectionEnabled,
+          expressionPreference: _expressionPreference,
+          recentExpressions: _recentExpressions,
+          favoriteExpressions: _favoriteExpressions,
+          expressionHabits: _expressionHabits,
+          vocabularyEntries: _vocabularyEntries,
+          personalObjects: _personalObjects,
+          personalObjectStore: _personalObjectStore,
+          onExpressionCompleted: _recordExpression,
+          onFavoriteSaved: _saveFavorite,
+          onHabitRecorded: _recordHabit,
+          onPersonalizedLearningChanged: _setPersonalizedLearningEnabled,
+          onAutoStuckDetectionChanged: _setAutoStuckDetectionEnabled,
+          onExpressionPreferenceChanged: _saveExpressionPreference,
+          onClearPersonalizedLearningData: _clearExpressionHabits,
+          onVocabularyChanged: _saveVocabulary,
+          onPersonalObjectsChanged: _loadLocalData,
+        ),
       ),
     );
   }
@@ -243,7 +382,10 @@ class HomePage extends StatelessWidget {
     super.key,
     required this.qwenService,
     required this.locationController,
+    required this.companionAgent,
     required this.personalizedLearningEnabled,
+    required this.autoStuckDetectionEnabled,
+    required this.expressionPreference,
     required this.recentExpressions,
     required this.favoriteExpressions,
     required this.expressionHabits,
@@ -254,6 +396,8 @@ class HomePage extends StatelessWidget {
     required this.onFavoriteSaved,
     required this.onHabitRecorded,
     required this.onPersonalizedLearningChanged,
+    required this.onAutoStuckDetectionChanged,
+    required this.onExpressionPreferenceChanged,
     required this.onClearPersonalizedLearningData,
     required this.onVocabularyChanged,
     required this.onPersonalObjectsChanged,
@@ -261,7 +405,10 @@ class HomePage extends StatelessWidget {
 
   final QwenService qwenService;
   final LocationRecommendationController locationController;
+  final CompanionAgentController companionAgent;
   final bool personalizedLearningEnabled;
+  final bool autoStuckDetectionEnabled;
+  final ExpressionPreference expressionPreference;
   final List<String> recentExpressions;
   final List<String> favoriteExpressions;
   final List<ExpressionHabit> expressionHabits;
@@ -272,6 +419,8 @@ class HomePage extends StatelessWidget {
   final ExpressionCallback onFavoriteSaved;
   final HabitRecordCallback onHabitRecorded;
   final ValueChanged<bool> onPersonalizedLearningChanged;
+  final ValueChanged<bool> onAutoStuckDetectionChanged;
+  final ValueChanged<ExpressionPreference> onExpressionPreferenceChanged;
   final VoidCallback onClearPersonalizedLearningData;
   final VocabularyChangedCallback onVocabularyChanged;
   final Future<void> Function() onPersonalObjectsChanged;
@@ -320,20 +469,51 @@ class HomePage extends StatelessWidget {
     await onPersonalObjectsChanged();
   }
 
+  Future<void> _openYuqiaoMemory(BuildContext context) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => YuqiaoMemoryPage(
+          recentExpressions: recentExpressions,
+          favoriteExpressions: favoriteExpressions,
+          expressionHabits: expressionHabits,
+          personalObjects: personalObjects,
+          locationController: locationController,
+          personalizedLearningEnabled: personalizedLearningEnabled,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openExpressionPreferences(BuildContext context) async {
+    final updated = await Navigator.of(context).push<ExpressionPreference>(
+      MaterialPageRoute<ExpressionPreference>(
+        builder: (_) => ExpressionPreferencePage(
+          initialPreference: expressionPreference,
+        ),
+      ),
+    );
+    if (updated != null) onExpressionPreferenceChanged(updated);
+  }
+
   @override
   Widget build(BuildContext context) {
     return star_ui.MainInterfaceScreen(
       locationRecommendationEnabled: locationController.enabled,
       personalizedLearningEnabled: personalizedLearningEnabled,
+      autoStuckDetectionEnabled: autoStuckDetectionEnabled,
+      expressionPreferenceSummary: expressionPreference.summary,
       savedWordCount: vocabularyEntries.length,
       savedPlaceCount: locationController.placeCount,
       savedPersonalObjectCount: personalObjects.length,
       onLocationRecommendationChanged: locationController.setEnabled,
       onPersonalizedLearningChanged: onPersonalizedLearningChanged,
+      onAutoStuckDetectionChanged: onAutoStuckDetectionChanged,
+      onOpenExpressionPreferences: () => _openExpressionPreferences(context),
       onClearPersonalizedLearningData: onClearPersonalizedLearningData,
       onClearPlaceData: locationController.clearPlaceData,
       locationController: locationController, // TODO: 调试用，以后删除
       onFavoriteSaved: onFavoriteSaved,
+      onOpenYuqiaoMemory: () => _openYuqiaoMemory(context),
       onOpenPersonalObjects: () => _openPersonalObjects(context),
       onStuck: () {
         locationController.refreshLocationContext();
@@ -342,8 +522,11 @@ class HomePage extends StatelessWidget {
             builder: (_) => StuckFlowPage(
               qwenService: qwenService,
               locationController: locationController,
+              companionAgent: companionAgent,
               vocabularyEntries: vocabularyEntries,
               expressionHabits: expressionHabits,
+              preferredCandidateCount:
+                  expressionPreference.effectiveCandidateCount,
               onHabitRecorded: onHabitRecorded,
               onExpressionCompleted: (text) async {
                 await onExpressionCompleted(text);
@@ -365,6 +548,7 @@ class HomePage extends StatelessWidget {
             builder: (_) => ConversationModePage(
               qwenService: qwenService,
               locationController: locationController,
+              companionAgent: companionAgent,
               recentExpressions: recentExpressions,
               favoriteExpressions: favoriteExpressions,
               expressionHabits: expressionHabits,
@@ -410,6 +594,363 @@ class HomePage extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class ExpressionPreferencePage extends StatefulWidget {
+  const ExpressionPreferencePage({
+    super.key,
+    required this.initialPreference,
+  });
+
+  final ExpressionPreference initialPreference;
+
+  @override
+  State<ExpressionPreferencePage> createState() =>
+      _ExpressionPreferencePageState();
+}
+
+class _ExpressionPreferencePageState extends State<ExpressionPreferencePage> {
+  late int _candidateCount;
+  late String _displayMode;
+
+  @override
+  void initState() {
+    super.initState();
+    _candidateCount = widget.initialPreference.effectiveCandidateCount;
+    _displayMode = widget.initialPreference.displayMode;
+  }
+
+  void _save() {
+    Navigator.of(context).pop(
+      ExpressionPreference(
+        preferredCandidateCount: _candidateCount,
+        displayMode: _displayMode,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF7F2EA),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(22, 14, 22, 28),
+          children: [
+            Row(
+              children: [
+                _RoundIconButton(
+                  icon: Icons.arrow_back_ios_new_rounded,
+                  onTap: () => Navigator.of(context).pop(),
+                ),
+                const SizedBox(width: 14),
+                const Expanded(
+                  child: Text(
+                    '表达偏好',
+                    style: TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF26282D),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              '设置补词时每一组显示多少个候选，以及界面更偏向哪种呈现方式。',
+              style: TextStyle(
+                fontSize: 16,
+                height: 1.45,
+                color: Color(0xFF7A7C82),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 22),
+            _PreferenceCard(
+              title: '每组候选数量',
+              subtitle: '少一点更轻松，多一点选择更充分',
+              child: Row(
+                children: [
+                  _ChoicePill(
+                    label: '2 个',
+                    selected: _candidateCount == 2,
+                    onTap: () => setState(() => _candidateCount = 2),
+                  ),
+                  const SizedBox(width: 10),
+                  _ChoicePill(
+                    label: '4 个',
+                    selected: _candidateCount == 4,
+                    onTap: () => setState(() => _candidateCount = 4),
+                  ),
+                  const SizedBox(width: 10),
+                  _ChoicePill(
+                    label: '6 个',
+                    selected: _candidateCount == 6,
+                    onTap: () => setState(() => _candidateCount = 6),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            _PreferenceCard(
+              title: '显示方式',
+              subtitle: '第一版先记录偏好，后续会继续影响更多页面',
+              child: Column(
+                children: [
+                  _ModeRow(
+                    title: '大文字',
+                    subtitle: '文字更醒目，适合快速点选',
+                    selected: _displayMode == 'largeText',
+                    onTap: () => setState(() => _displayMode = 'largeText'),
+                  ),
+                  const SizedBox(height: 10),
+                  _ModeRow(
+                    title: '图文一起',
+                    subtitle: '文字和图标保持平衡',
+                    selected: _displayMode == 'mixed',
+                    onTap: () => setState(() => _displayMode = 'mixed'),
+                  ),
+                  const SizedBox(height: 10),
+                  _ModeRow(
+                    title: '图片优先',
+                    subtitle: '更依赖图像和符号辅助理解',
+                    selected: _displayMode == 'imageFirst',
+                    onTap: () => setState(() => _displayMode = 'imageFirst'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              height: 58,
+              child: ElevatedButton(
+                onPressed: _save,
+                style: ElevatedButton.styleFrom(
+                  elevation: 0,
+                  backgroundColor: const Color(0xFF5F8DF7),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(22),
+                  ),
+                ),
+                child: const Text(
+                  '保存偏好',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PreferenceCard extends StatelessWidget {
+  const _PreferenceCard({
+    required this.title,
+    required this.subtitle,
+    required this.child,
+  });
+
+  final String title;
+  final String subtitle;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.72)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.045),
+            blurRadius: 22,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 21,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF2C2D31),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: const TextStyle(
+              fontSize: 14,
+              height: 1.35,
+              color: Color(0xFF8A8782),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 16),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class _ChoicePill extends StatelessWidget {
+  const _ChoicePill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          height: 52,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected
+                ? const Color(0xFF5F8DF7)
+                : const Color(0xFFF4F1EC),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w900,
+              color: selected ? Colors.white : const Color(0xFF4A4B50),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RoundIconButton extends StatelessWidget {
+  const _RoundIconButton({
+    required this.icon,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 54,
+        height: 54,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.70),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.78)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.045),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Icon(icon, size: 22, color: const Color(0xFF4B4D54)),
+      ),
+    );
+  }
+}
+
+class _ModeRow extends StatelessWidget {
+  const _ModeRow({
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: selected
+              ? const Color(0xFFE8EFFD)
+              : const Color(0xFFF7F5F1),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected
+                ? const Color(0xFF7EA3F8)
+                : Colors.white.withValues(alpha: 0.65),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              selected
+                  ? Icons.check_circle_rounded
+                  : Icons.circle_outlined,
+              color: selected
+                  ? const Color(0xFF5F8DF7)
+                  : const Color(0xFFAAA59E),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF2F3035),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      height: 1.25,
+                      color: Color(0xFF8C8984),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -3145,6 +3686,7 @@ class ConversationModePage extends StatefulWidget {
     super.key,
     required this.qwenService,
     required this.locationController,
+    required this.companionAgent,
     required this.recentExpressions,
     required this.favoriteExpressions,
     required this.expressionHabits,
@@ -3156,6 +3698,7 @@ class ConversationModePage extends StatefulWidget {
 
   final QwenService qwenService;
   final LocationRecommendationController locationController;
+  final CompanionAgentController companionAgent;
   final List<String> recentExpressions;
   final List<String> favoriteExpressions;
   final List<ExpressionHabit> expressionHabits;
@@ -3235,7 +3778,7 @@ class _ConversationUnderstanding {
 }
 
 class _ConversationModePageState extends State<ConversationModePage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final XfyunRealtimeAsrService _asrService = XfyunRealtimeAsrService();
   final FlutterTts _conversationTts = FlutterTts();
   final ScrollController _transcriptScrollController = ScrollController();
@@ -3271,6 +3814,7 @@ class _ConversationModePageState extends State<ConversationModePage>
   bool _isReadingUnderstanding = false;
   bool _asrNeedsManualReconnect = false;
   bool _manualConversationStop = false;
+  bool _conversationPausedByLifecycle = false;
   int _asrReconnectAttempts = 0;
   int? _userSpeakerId;
   int _conversationEventRevision = 0;
@@ -3289,17 +3833,19 @@ class _ConversationModePageState extends State<ConversationModePage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.locationController.refreshLocationContext();
     unawaited(_loadSavedConversationTerms());
     unawaited(_configureConversationTts());
     _orbController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2800),
-    )..repeat();
+    );
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _orbController.dispose();
     _pauseTimer?.cancel();
     _speechRepairTimer?.cancel();
@@ -3315,6 +3861,54 @@ class _ConversationModePageState extends State<ConversationModePage>
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (_conversationPausedByLifecycle && mounted) {
+        setState(() {
+          _conversationPausedByLifecycle = false;
+          _asrNeedsManualReconnect = _conversationActive;
+          _status = _conversationActive ? '对话已暂停，点击重新连接继续' : _status;
+        });
+        if (_conversationActive && !_orbController.isAnimating) {
+          _orbController.repeat();
+        }
+      }
+      return;
+    }
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      _pauseConversationForLifecycle();
+    }
+  }
+
+  void _pauseConversationForLifecycle() {
+    if (_conversationPausedByLifecycle) return;
+    _conversationPausedByLifecycle = true;
+    _pauseTimer?.cancel();
+    _speechRepairTimer?.cancel();
+    _asrReconnectTimer?.cancel();
+    _cancelConversationQwenRequests();
+    if (_orbController.isAnimating) {
+      _orbController.stop();
+    }
+    if (_conversationActive) {
+      unawaited(_asrService.stop());
+    }
+    if (!mounted) return;
+    setState(() {
+      _isListening = false;
+      _isStartingSpeech = false;
+      _isSuggesting = false;
+      _isGeneratingStuckAssist = false;
+      _isAnalyzingSpeechRepair = false;
+      _asrNeedsManualReconnect = _conversationActive;
+      _status = _conversationActive ? '对话已暂停，回到前台后可继续' : _status;
+    });
+  }
+
   Future<void> _configureConversationTts() async {
     await _conversationTts.setLanguage('zh-CN');
     await _conversationTts.setSpeechRate(0.45);
@@ -3326,6 +3920,7 @@ class _ConversationModePageState extends State<ConversationModePage>
     final terms = await _conversationTermStore.loadAll();
     if (!mounted) return;
     setState(() => _savedConversationTerms = terms);
+    _syncCompanionConversationContext();
     _transcriptRevision.value++;
   }
 
@@ -3382,7 +3977,7 @@ class _ConversationModePageState extends State<ConversationModePage>
       }
       _transcriptRevision.value++;
     } catch (error) {
-      debugPrint('[Conversation terms] extraction skipped: $error');
+      yuqiaoDebugLog('[Conversation terms] extraction skipped: $error');
     } finally {
       token.cancel();
       if (identical(_termExtractionToken, token)) {
@@ -3452,7 +4047,7 @@ class _ConversationModePageState extends State<ConversationModePage>
     setState(() => _status = '对话模式已关闭');
     _orbController
       ..duration = const Duration(milliseconds: 2800)
-      ..repeat();
+      ..stop();
   }
 
   void _handleAsrStatus(String status) {
@@ -3552,6 +4147,7 @@ class _ConversationModePageState extends State<ConversationModePage>
       }
     });
     _transcriptRevision.value++;
+    _syncCompanionConversationContext();
     _scrollTranscriptToLatest();
     if (isFinal) {
       _queueConversationTermExtraction(words);
@@ -3637,7 +4233,7 @@ class _ConversationModePageState extends State<ConversationModePage>
           .timeout(const Duration(seconds: 5));
     } catch (error) {
       if (error is! QwenCancelledException) {
-        debugPrint('[Conversation speech repair] analysis skipped: $error');
+        yuqiaoDebugLog('[Conversation speech repair] analysis skipped: $error');
       }
     }
     if (identical(_speechRepairToken, token)) _speechRepairToken = null;
@@ -3783,7 +4379,7 @@ class _ConversationModePageState extends State<ConversationModePage>
     } catch (error) {
       token.cancel();
       if (error is! QwenCancelledException) {
-        debugPrint('[Conversation stuck assist] generation skipped: $error');
+        yuqiaoDebugLog('[Conversation stuck assist] generation skipped: $error');
       }
     }
     if (identical(_stuckAssistToken, token)) _stuckAssistToken = null;
@@ -3953,7 +4549,7 @@ class _ConversationModePageState extends State<ConversationModePage>
         ),
       );
     } catch (error) {
-      debugPrint('[Conversation stuck assist] speak failed: $error');
+      yuqiaoDebugLog('[Conversation stuck assist] speak failed: $error');
       if (mounted) {
         setState(() => _error = '播报失败，请稍后重试');
       }
@@ -4091,19 +4687,18 @@ class _ConversationModePageState extends State<ConversationModePage>
           )
           .timeout(const Duration(seconds: 5));
       if (!mounted) return;
-      final ranked = widget.locationController.recommendWords(
+      _syncCompanionConversationContext();
+      final ranked = await widget.companionAgent.rankExpressions(
         raw,
+        feature: 'conversation',
         category: 'conversation',
-        context: RecommendationContext(
-          feature: 'conversation',
-          prompt: _latestUserFragment,
-          slot: RecommendationContext.inferSlot(_latestUserFragment),
-          selectedWords: [_latestUserFragment],
-          allowContextExpansion: RecommendationContext.inferSlot(
-                _latestUserFragment,
-              ) !=
-              RecommendationSlot.topic,
-        ),
+        prompt: _latestUserFragment,
+        slot: RecommendationContext.inferSlot(_latestUserFragment),
+        selectedWords: [_latestUserFragment],
+        allowContextExpansion:
+            RecommendationContext.inferSlot(_latestUserFragment) !=
+                RecommendationSlot.topic,
+        limit: 8,
       );
       final rawByNormalized = <String, String>{
         for (final item in raw)
@@ -4147,7 +4742,7 @@ class _ConversationModePageState extends State<ConversationModePage>
           _error = '暂时没有理解当前上下文，请再说几个字后重试。';
           _status = '上下文补词失败';
         });
-        debugPrint('[Qwen conversation] failed: $error');
+        yuqiaoDebugLog('[Qwen conversation] failed: $error');
       }
     }
     if (identical(_conversationSuggestionToken, token)) {
@@ -4405,6 +5000,13 @@ class _ConversationModePageState extends State<ConversationModePage>
       contextKey: _feedbackContextKey,
       candidate: suggestion,
     ));
+    unawaited(widget.companionAgent.recordInteraction(
+      text: suggestion,
+      feature: 'conversation',
+      action: CompanionFeedbackAction.accepted,
+      prompt: _latestUserFragment,
+      slot: RecommendationContext.inferSlot(_latestUserFragment),
+    ));
     final separator = suggestion.indexOf(RegExp(r'[：:]'));
     final suggestionType =
         separator > 0 ? suggestion.substring(0, separator).trim() : '继续表达';
@@ -4444,6 +5046,22 @@ class _ConversationModePageState extends State<ConversationModePage>
                 category: 'conversation',
                 source: 'conversation_sentence_candidate',
               ),
+            );
+            unawaited(widget.companionAgent.recordInteraction(
+              text: text,
+              feature: 'conversation',
+              action: CompanionFeedbackAction.accepted,
+              prompt: _latestUserFragment,
+              slot: RecommendationContext.inferSlot(_latestUserFragment),
+            ));
+          },
+          onCandidatesRejected: (sentences) async {
+            await widget.companionAgent.recordRejectedBatch(
+              texts: sentences,
+              feature: 'conversation',
+              action: CompanionFeedbackAction.rejected,
+              prompt: _latestUserFragment,
+              slot: RecommendationContext.inferSlot(_latestUserFragment),
             );
           },
           onExpressionCompleted: widget.onExpressionCompleted,
@@ -4682,6 +5300,18 @@ class _ConversationModePageState extends State<ConversationModePage>
                                               contextKey: _feedbackContextKey,
                                               candidates: rejected,
                                             ));
+                                            unawaited(widget.companionAgent
+                                                .recordRejectedBatch(
+                                              texts: rejected,
+                                              feature: 'conversation',
+                                              action: CompanionFeedbackAction
+                                                  .refreshed,
+                                              prompt: _latestUserFragment,
+                                              slot:
+                                                  RecommendationContext.inferSlot(
+                                                _latestUserFragment,
+                                              ),
+                                            ));
                                             Navigator.of(dialogContext).pop();
                                             unawaited(_suggestFromContext(
                                               excludedCandidates: rejected,
@@ -4786,6 +5416,16 @@ class _ConversationModePageState extends State<ConversationModePage>
       }
     }
     return _contextLines.isEmpty ? '' : _contextLines.last.trim();
+  }
+
+  void _syncCompanionConversationContext() {
+    widget.companionAgent.updateConversationContext(
+      transcript: _conversationContextForModel,
+      latestUserFragment: _latestUserFragment,
+      userSpeakerLabel:
+          _userSpeakerId == null ? '未确认' : '说话者$_userSpeakerId',
+      conversationTerms: _savedConversationTerms,
+    );
   }
 
   Future<void> _waitForTranscriptSnapshot() async {
@@ -4940,7 +5580,7 @@ class _ConversationModePageState extends State<ConversationModePage>
       await _conversationTts.awaitSpeakCompletion(true);
       await _conversationTts.speak(text.trim());
     } catch (error) {
-      debugPrint('[Conversation understanding] TTS failed: $error');
+      yuqiaoDebugLog('[Conversation understanding] TTS failed: $error');
       if (mounted) setState(() => _error = '慢速朗读失败，请稍后重试');
     } finally {
       await _configureConversationTts();
@@ -5191,6 +5831,312 @@ class _ConversationModePageState extends State<ConversationModePage>
         },
       ),
     );
+  }
+
+  void _showTranscriptBottomSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.16),
+      builder: (context) {
+        final screenHeight = MediaQuery.sizeOf(context).height;
+        return ValueListenableBuilder<int>(
+          valueListenable: _transcriptRevision,
+          builder: (context, _, __) {
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.viewInsetsOf(context).bottom,
+              ),
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: SafeArea(
+                  top: false,
+                  child: Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                    constraints: BoxConstraints(
+                      maxHeight: screenHeight * 0.78,
+                      minHeight: math.min(420.0, screenHeight * 0.52),
+                    ),
+                    padding: const EdgeInsets.all(1.6),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(34),
+                      gradient: const LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Color(0xFFFF78AF),
+                          Color(0xFFFFC1BE),
+                          Color(0xFFF4F1A1),
+                          Color(0xFFAAEEA8),
+                          Color(0xFFADE8F6),
+                          Color(0xFFFFD9E5),
+                        ],
+                        stops: [0.00, 0.22, 0.40, 0.62, 0.82, 1.00],
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.11),
+                          blurRadius: 28,
+                          offset: const Offset(0, 16),
+                        ),
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(32),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(32),
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.white.withValues(alpha: 0.94),
+                                const Color(0xFFFFFBFC).withValues(alpha: 0.88),
+                                const Color(0xFFFDFDFE).withValues(alpha: 0.84),
+                              ],
+                            ),
+                          ),
+                          child: Stack(
+                            children: [
+                              Positioned(
+                                left: 18,
+                                right: 18,
+                                top: 10,
+                                child: Center(
+                                  child: Container(
+                                    width: 54,
+                                    height: 5,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFDADCE2),
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: _TranscriptGlowPainter(),
+                                  ),
+                                ),
+                              ),
+                              Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(22, 24, 22, 18),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Expanded(
+                                          child: Text(
+                                            '实时转录',
+                                            style: TextStyle(
+                                              fontSize: 23,
+                                              fontWeight: FontWeight.w900,
+                                              color: Color(0xFF17181C),
+                                            ),
+                                          ),
+                                        ),
+                                        GestureDetector(
+                                          onTap: () =>
+                                              Navigator.of(context).pop(),
+                                          child: Container(
+                                            width: 36,
+                                            height: 36,
+                                            decoration: BoxDecoration(
+                                              color: Colors.white
+                                                  .withValues(alpha: 0.64),
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: const Icon(
+                                              Icons.close_rounded,
+                                              size: 19,
+                                              color: Color(0xFF4B4F58),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    if (_knownSpeakerIds.isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 10),
+                                        child: Wrap(
+                                          spacing: 7,
+                                          runSpacing: 7,
+                                          children: [
+                                            const Text(
+                                              '我的声音',
+                                              style: TextStyle(
+                                                fontSize: 12.5,
+                                                color: Color(0xFF7A7C84),
+                                              ),
+                                            ),
+                                            ...(_knownSpeakerIds.toList()
+                                                  ..sort())
+                                                .map((speakerId) {
+                                              final selected =
+                                                  _userSpeakerId == speakerId;
+                                              return ChoiceChip(
+                                                visualDensity:
+                                                    VisualDensity.compact,
+                                                label: Text('说话者$speakerId'),
+                                                selected: selected,
+                                                onSelected: (_) =>
+                                                    _selectUserSpeaker(
+                                                        speakerId),
+                                                selectedColor:
+                                                    const Color(0xFFE25C7F)
+                                                        .withValues(
+                                                            alpha: 0.14),
+                                                side: BorderSide(
+                                                  color: selected
+                                                      ? const Color(0xFFE25C7F)
+                                                      : const Color(0xFFE1E2E7),
+                                                ),
+                                              );
+                                            }),
+                                          ],
+                                        ),
+                                      ),
+                                    if (_conversationTermCandidates.isNotEmpty)
+                                      const Padding(
+                                        padding: EdgeInsets.only(top: 8),
+                                        child: Text(
+                                          '点击高亮词，可确认保存为个人特殊词汇',
+                                          style: TextStyle(
+                                            fontSize: 12.5,
+                                            color: Color(0xFF7A7C84),
+                                          ),
+                                        ),
+                                      ),
+                                    if (_conversationSummary.isNotEmpty)
+                                      Container(
+                                        width: double.infinity,
+                                        margin: const EdgeInsets.only(top: 10),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 8,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF3478F6)
+                                              .withValues(alpha: 0.07),
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        child: Text(
+                                          _conversationSummary,
+                                          maxLines: 3,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            height: 1.35,
+                                            color: Color(0xFF60636C),
+                                          ),
+                                        ),
+                                      ),
+                                    const SizedBox(height: 14),
+                                    Expanded(
+                                      child: _conversationText.trim().isEmpty
+                                          ? Center(
+                                              child: Text(
+                                                '还没有转录内容\n开启对话后开始收录',
+                                                textAlign: TextAlign.center,
+                                                style: TextStyle(
+                                                  fontSize: 15,
+                                                  height: 1.5,
+                                                  color: const Color(0xFF2A2D34)
+                                                      .withValues(alpha: 0.56),
+                                                ),
+                                              ),
+                                            )
+                                          : ListView.builder(
+                                              controller:
+                                                  _transcriptScrollController,
+                                              itemCount:
+                                                  _finalizedTranscriptSegments
+                                                          .length +
+                                                      (_currentTranscript
+                                                              .trim()
+                                                              .isNotEmpty
+                                                          ? 1
+                                                          : 0),
+                                              itemBuilder: (context, index) {
+                                                final finalized =
+                                                    _finalizedTranscriptSegments;
+                                                final isCurrent =
+                                                    index == finalized.length;
+                                                return Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                    bottom: 12,
+                                                  ),
+                                                  child: isCurrent
+                                                      ? _buildHighlightedTranscriptLine(
+                                                          _currentTranscript
+                                                              .trim(),
+                                                          true,
+                                                        )
+                                                      : _buildTranscriptEntry(
+                                                          finalized[index],
+                                                        ),
+                                                );
+                                              },
+                                            ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    SizedBox(
+                                      width: double.infinity,
+                                      height: 50,
+                                      child: FilledButton.icon(
+                                        onPressed: _isSuggesting ||
+                                                _isGeneratingStuckAssist
+                                            ? null
+                                            : () =>
+                                                _openStuckSuggestionFromTranscript(
+                                                  context,
+                                                ),
+                                        icon: const Icon(
+                                          Icons.auto_awesome_rounded,
+                                          size: 19,
+                                        ),
+                                        label: Text(
+                                          _isSuggesting ||
+                                                  _isGeneratingStuckAssist
+                                              ? '正在理解上下文'
+                                              : '我卡住了',
+                                        ),
+                                        style: FilledButton.styleFrom(
+                                          backgroundColor:
+                                              const Color(0xFFE25C7F),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(18),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    _scrollTranscriptToLatest(animate: false);
   }
 
   void _showTranscriptDialog(BuildContext context) {
@@ -5710,7 +6656,7 @@ class _ConversationModePageState extends State<ConversationModePage>
                 const SizedBox(height: 16),
                 // Orb（点击弹出 ASR 转录内容）
                 GestureDetector(
-                  onTap: () => _showTranscriptDialog(context),
+                  onTap: () => _showTranscriptBottomSheet(context),
                   child: SizedBox(
                     width: orbSize,
                     height: orbSize,
@@ -6423,8 +7369,10 @@ class StuckFlowPage extends StatefulWidget {
     super.key,
     required this.qwenService,
     required this.locationController,
+    required this.companionAgent,
     required this.vocabularyEntries,
     required this.expressionHabits,
+    this.preferredCandidateCount = 4,
     required this.onHabitRecorded,
     required this.onExpressionCompleted,
     required this.onFavoriteSaved,
@@ -6432,8 +7380,10 @@ class StuckFlowPage extends StatefulWidget {
 
   final QwenService qwenService;
   final LocationRecommendationController locationController;
+  final CompanionAgentController companionAgent;
   final List<VocabularyEntry> vocabularyEntries;
   final List<ExpressionHabit> expressionHabits;
+  final int preferredCandidateCount;
   final HabitRecordCallback onHabitRecorded;
   final ExpressionCallback onExpressionCompleted;
   final ExpressionCallback onFavoriteSaved;
@@ -6524,6 +7474,13 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
         source: 'stuck_candidate',
       ),
     );
+    unawaited(widget.companionAgent.recordInteraction(
+      text: candidate.text,
+      feature: 'stuck',
+      action: CompanionFeedbackAction.accepted,
+      prompt: session.currentStep?.title ?? session.intent.sentenceIntent,
+      slot: _locationSlotFor(candidate.slot),
+    ));
     setState(() {
       session.select(candidate);
       _resetStepState();
@@ -6612,6 +7569,22 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
                 source: 'stuck_sentence_candidate',
               ),
             );
+            unawaited(widget.companionAgent.recordInteraction(
+              text: text,
+              feature: 'stuck',
+              action: CompanionFeedbackAction.accepted,
+              prompt: session.intent.sentenceIntent,
+              slot: RecommendationSlot.sentence,
+            ));
+          },
+          onCandidatesRejected: (sentences) async {
+            await widget.companionAgent.recordRejectedBatch(
+              texts: sentences,
+              feature: 'stuck',
+              action: CompanionFeedbackAction.rejected,
+              prompt: session.intent.sentenceIntent,
+              slot: RecommendationSlot.sentence,
+            );
           },
           onExpressionCompleted: widget.onExpressionCompleted,
           onFavoriteSaved: widget.onFavoriteSaved,
@@ -6674,6 +7647,7 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
                   localCandidates.map((candidate) => candidate.text).toList(),
               personalWords: _personalWordsForStep(step),
               excludeOptions: _seenCandidates.toList(),
+              displayCount: widget.preferredCandidateCount.clamp(2, 6).toInt(),
               diversificationLevel: diversificationLevel,
             ),
             cancellationToken: token,
@@ -6683,7 +7657,7 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
       final cancelled = token.isCancelled || error is QwenCancelledException;
       token.cancel();
       if (!cancelled) {
-        debugPrint('[StuckFlow] Qwen candidate fallback: $error');
+        yuqiaoDebugLog('[StuckFlow] Qwen candidate fallback: $error');
       }
     }
     if (!mounted || requestId != _recommendationRequestId) return;
@@ -6698,13 +7672,14 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
     }
     if (!mounted || requestId != _recommendationRequestId) return;
 
-    final merged = _mergeCandidatePool(
+    final merged = await _mergeCandidatePool(
       modelCandidates: modelCandidates,
       localCandidates: localCandidates,
       step: step,
     );
+    if (!mounted || requestId != _recommendationRequestId) return;
     final next = _takeDiverseCandidates(merged, step);
-    debugPrint(
+    yuqiaoDebugLog(
       '[StuckFlow] source=${modelCandidates.isEmpty ? 'local-fallback' : 'qwen'} '
       'elapsedMs=${DateTime.now().difference(startedAt).inMilliseconds} '
       'context=${session.selections.map((item) => item.candidate.text).join('/')} '
@@ -6756,11 +7731,11 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
     ].take(24).toList();
   }
 
-  List<StuckCandidate> _mergeCandidatePool({
+  Future<List<StuckCandidate>> _mergeCandidatePool({
     required List<StuckCandidate> modelCandidates,
     required List<StuckCandidate> localCandidates,
     required StuckStepDefinition step,
-  }) {
+  }) async {
     final valid = <StuckCandidate>[];
     final seen = <String>{};
     for (final candidate in [...modelCandidates, ...localCandidates]) {
@@ -6792,6 +7767,29 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
         LocationRecommendationController.normalizeText(rankedWords[index]):
             index,
     };
+    final recommendationContext = _recommendationContext(step);
+    final selectedWords = recommendationContext.selectedWords;
+    List<String> companionRankedWords = const [];
+    try {
+      companionRankedWords = await widget.companionAgent.rankExpressions(
+        valid.map((candidate) => candidate.text).toList(),
+        feature: recommendationContext.feature,
+        category: 'stuck',
+        prompt: recommendationContext.prompt,
+        slot: recommendationContext.slot,
+        selectedWords: selectedWords,
+        allowContextExpansion: recommendationContext.allowContextExpansion,
+        limit: valid.length,
+      );
+    } catch (error) {
+      yuqiaoDebugLog('[StuckFlow] companion ranking skipped: $error');
+    }
+    final companionRank = <String, int>{
+      for (var index = 0; index < companionRankedWords.length; index++)
+        LocationRecommendationController.normalizeText(
+          companionRankedWords[index],
+        ): index,
+    };
     final baseIndex = <String, int>{
       for (var index = 0; index < valid.length; index++)
         LocationRecommendationController.normalizeText(valid[index].text):
@@ -6805,7 +7803,9 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
         final orderScore = 120.0 - (baseIndex[normalized] ?? 12) * 8;
         final contextScore =
             math.max(0, 20 - (locationRank[normalized] ?? 20)).toDouble();
-        return sourceScore + orderScore + contextScore;
+        final companionScore =
+            math.max(0, 24 - (companionRank[normalized] ?? 24)).toDouble();
+        return sourceScore + orderScore + contextScore + companionScore;
       }
 
       return scoreOf(b).compareTo(scoreOf(a));
@@ -6904,13 +7904,50 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
     );
   }
 
+  String _candidateMeaningKey(StuckCandidate candidate) {
+    var normalized = LocationRecommendationController.normalizeText(
+      candidate.text,
+    );
+    normalized = normalized
+        .replaceAll(RegExp(r'^(我想|我要|请|麻烦|能不能|可以|帮我|给我|把)'), '')
+        .replaceAll(RegExp(r'(一下|一点|可以吗|好吗|吗)$'), '')
+        .trim();
+    if (normalized.isEmpty) normalized = candidate.text.trim();
+
+    final synonymGroups = <String, List<String>>{
+      'get_object': ['拿', '取', '递', '给我', '带来', '找给我'],
+      'find_object': ['找', '寻找', '找不到', '在哪里', '哪儿', '哪'],
+      'drink_water': ['喝水', '水杯', '水瓶', '口渴', '倒水'],
+      'eat_food': ['吃饭', '吃东西', '饭', '饿', '点餐'],
+      'rest': ['休息', '坐一会', '躺', '睡觉', '太累'],
+      'toilet': ['厕所', '卫生间', '上厕所'],
+      'pain': ['疼', '痛', '不舒服', '难受'],
+      'repeat': ['再说', '重复', '没听清', '慢一点'],
+      'family': ['妈妈', '爸爸', '家人', '朋友'],
+      'medical_staff': ['医生', '护士', '治疗师'],
+      'pay': ['付款', '缴费', '结账', '买单', '多少钱'],
+      'go_home': ['回家', '回去', '到家'],
+    };
+    for (final entry in synonymGroups.entries) {
+      if (entry.value.any(normalized.contains)) {
+        return '${candidate.slot.name}:${entry.key}';
+      }
+    }
+
+    final compact =
+        normalized.length <= 4 ? normalized : normalized.substring(0, 4);
+    return '${candidate.slot.name}:$compact';
+  }
+
   List<StuckCandidate> _takeDiverseCandidates(
     List<StuckCandidate> pool,
     StuckStepDefinition step,
   ) {
     final result = <StuckCandidate>[];
+    final targetCount = widget.preferredCandidateCount.clamp(2, 6).toInt();
     final groups = <String>{};
     final selectedTexts = <String>{};
+    final selectedMeanings = <String>{};
     final normalizedSeen = _seenCandidates
         .map(LocationRecommendationController.normalizeText)
         .toSet();
@@ -6918,35 +7955,63 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
     bool addCandidate(
       StuckCandidate candidate, {
       required bool requireNewGroup,
+      required bool requireNewMeaning,
     }) {
       final normalized =
           LocationRecommendationController.normalizeText(candidate.text);
+      final meaningKey = _candidateMeaningKey(candidate);
       if (candidate.slot != step.slot ||
           normalizedSeen.contains(normalized) ||
           selectedTexts.contains(normalized) ||
+          (requireNewMeaning && selectedMeanings.contains(meaningKey)) ||
           (requireNewGroup && groups.contains(candidate.semanticGroup))) {
         return false;
       }
       groups.add(candidate.semanticGroup);
       selectedTexts.add(normalized);
+      selectedMeanings.add(meaningKey);
       result.add(candidate);
-      return result.length == 4;
+      return result.length == targetCount;
     }
 
     // 第一轮优先使用真正的模型结果；本地词只在模型不足时补位。
     for (final candidate in pool.where((item) => item.isModelGenerated)) {
-      if (addCandidate(candidate, requireNewGroup: true)) return result;
+      if (addCandidate(
+        candidate,
+        requireNewGroup: true,
+        requireNewMeaning: true,
+      )) {
+        return result;
+      }
     }
     // 模型偶尔会复用 semanticGroup。此时优先保留其上下文候选，
     // 不要为了凑齐四种标签而立即回填无关的本地模板。
     for (final candidate in pool.where((item) => item.isModelGenerated)) {
-      if (addCandidate(candidate, requireNewGroup: false)) return result;
+      if (addCandidate(
+        candidate,
+        requireNewGroup: false,
+        requireNewMeaning: true,
+      )) {
+        return result;
+      }
     }
     for (final candidate in pool) {
-      if (addCandidate(candidate, requireNewGroup: true)) return result;
+      if (addCandidate(
+        candidate,
+        requireNewGroup: true,
+        requireNewMeaning: true,
+      )) {
+        return result;
+      }
     }
     for (final candidate in pool) {
-      if (addCandidate(candidate, requireNewGroup: false)) return result;
+      if (addCandidate(
+        candidate,
+        requireNewGroup: false,
+        requireNewMeaning: false,
+      )) {
+        return result;
+      }
     }
     return result;
   }
@@ -7187,31 +8252,59 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
   }
 
   Widget _buildExpressionTrail(StuckExpressionSession session) {
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        Chip(
-          avatar: const Icon(Icons.route_rounded, size: 17),
-          label: Text(session.intent.label),
-          side: BorderSide.none,
-          backgroundColor: AppColors.primaryLight,
-        ),
-        if (session.seedFragment.isNotEmpty)
-          ActionChip(
-            avatar: const Icon(Icons.edit_note_rounded, size: 17),
-            label: Text(session.seedFragment),
-            onPressed: () => _openFragmentInput(asSeed: true),
+    final selectedCount = session.selections.length;
+    final stepCount = session.activeSteps.length;
+    final lastSelection =
+        session.selections.isEmpty ? null : session.selections.last;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.64),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.72)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: const BoxDecoration(
+              color: AppColors.primaryLight,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.route_rounded,
+              size: 16,
+              color: AppColors.primary,
+            ),
           ),
-        ...session.selections.map(
-          (selection) => ActionChip(
-            avatar: const Icon(Icons.check_rounded, size: 17),
-            label: Text(selection.candidate.text),
-            tooltip: '修改${selection.slot.label}',
-            onPressed: () => _editFrom(selection.slot),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              selectedCount == 0
+                  ? session.intent.label
+                  : '${session.intent.label} · 已补充 $selectedCount/$stepCount 项',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                color: AppColors.textPrimary,
+              ),
+            ),
           ),
-        ),
-      ],
+          if (session.seedFragment.isNotEmpty)
+            TextButton(
+              onPressed: () => _openFragmentInput(asSeed: true),
+              child: const Text('改提示'),
+            ),
+          if (lastSelection != null)
+            TextButton(
+              onPressed: () => _editFrom(lastSelection.slot),
+              child: const Text('改上一步'),
+            ),
+        ],
+      ),
     );
   }
 
@@ -7243,7 +8336,9 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
             else ...[
               if (step != null)
                 _isRecommending
-                    ? const _CandidateLoadingGrid()
+                    ? _CandidateLoadingGrid(
+                        count: widget.preferredCandidateCount,
+                      )
                     : _StuckCandidateGrid(
                         candidates: _visibleCandidates,
                         onSelected: _chooseCandidate,
@@ -7555,7 +8650,12 @@ class _ClarificationAction extends StatelessWidget {
 }
 
 class _CandidateLoadingGrid extends StatefulWidget {
-  const _CandidateLoadingGrid({super.key});
+  const _CandidateLoadingGrid({
+    super.key,
+    required this.count,
+  });
+
+  final int count;
 
   @override
   State<_CandidateLoadingGrid> createState() => _CandidateLoadingGridState();
@@ -7582,10 +8682,11 @@ class _CandidateLoadingGridState extends State<_CandidateLoadingGrid>
 
   @override
   Widget build(BuildContext context) {
+    final count = widget.count.clamp(2, 6).toInt();
     return GridView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
-      itemCount: 4,
+      itemCount: count,
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 2,
         crossAxisSpacing: AppSpacing.gap,
@@ -7593,7 +8694,7 @@ class _CandidateLoadingGridState extends State<_CandidateLoadingGrid>
         childAspectRatio: 1.35,
       ),
       itemBuilder: (context, index) {
-        final style = _candidateCardStyles[index];
+        final style = _candidateCardStyles[index % _candidateCardStyles.length];
         return AnimatedBuilder(
           animation: _controller,
           builder: (context, child) {
@@ -7816,6 +8917,7 @@ class AiCandidatesPage extends StatefulWidget {
     required this.qwenService,
     this.onExitFlow,
     this.onCandidateSelected,
+    this.onCandidatesRejected,
     required this.onExpressionCompleted,
     required this.onFavoriteSaved,
   });
@@ -7824,6 +8926,7 @@ class AiCandidatesPage extends StatefulWidget {
   final QwenService qwenService;
   final VoidCallback? onExitFlow;
   final ExpressionCallback? onCandidateSelected;
+  final Future<void> Function(List<String> sentences)? onCandidatesRejected;
   final ExpressionCallback onExpressionCompleted;
   final ExpressionCallback onFavoriteSaved;
 
@@ -7835,6 +8938,7 @@ class _AiCandidatesPageState extends State<AiCandidatesPage> {
   late Future<List<String>> _future;
   QwenCancellationToken? _cancellationToken;
   bool _exitingFlow = false;
+  bool _returningToSelection = false;
 
   @override
   void initState() {
@@ -7875,11 +8979,27 @@ class _AiCandidatesPageState extends State<AiCandidatesPage> {
     onExitFlow();
   }
 
+  void _returnToSelection([List<String> rejectedSentences = const []]) {
+    if (_returningToSelection || _exitingFlow) return;
+    setState(() => _returningToSelection = true);
+    _cancellationToken?.cancel();
+    if (rejectedSentences.isNotEmpty) {
+      final onCandidatesRejected = widget.onCandidatesRejected;
+      if (onCandidatesRejected != null) {
+        unawaited(onCandidatesRejected(rejectedSentences));
+      }
+    }
+    Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     return PopScope<Object?>(
+      canPop: widget.onExitFlow == null || _returningToSelection,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop && widget.onExitFlow != null) _handleBack();
+        if (!didPop && widget.onExitFlow != null && !_returningToSelection) {
+          _handleBack();
+        }
       },
       child: Scaffold(
         backgroundColor: const Color(0xFFF7F5F0),
@@ -8114,7 +9234,7 @@ class _AiCandidatesPageState extends State<AiCandidatesPage> {
         // 底部按钮
         Center(
           child: GestureDetector(
-            onTap: () => Navigator.of(context).pop(),
+            onTap: () => _returnToSelection(sentences.take(3).toList()),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
               decoration: BoxDecoration(
@@ -8776,7 +9896,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
     try {
       normalizedBytes = await compute(normalizeCameraImage, bytes);
     } catch (error) {
-      debugPrint('[Camera image] normalization skipped: $error');
+      yuqiaoDebugLog('[Camera image] normalization skipped: $error');
       normalizedBytes = bytes;
     }
     if (!mounted || requestId != _imageRequestId) return;
@@ -11350,8 +12470,9 @@ class _ConfirmSpeakPageState extends State<ConfirmSpeakPage> {
   @override
   Widget build(BuildContext context) {
     return PopScope<Object?>(
+      canPop: widget.onExitFlow == null,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop && widget.onExitFlow != null) _handleBack();
+        if (!didPop && widget.onExitFlow != null) _handleBack();
       },
       child: Scaffold(
         backgroundColor: const Color(0xFFF7F5F0),
@@ -11764,11 +12885,11 @@ class QwenService {
       } catch (error) {
         lastError = error;
         rejectionReasons.add('上次返回格式不稳定或候选句未通过校验，请严格返回 JSON');
-        debugPrint('[Qwen generateSentences] retryable failure: $error');
+        yuqiaoDebugLog('[Qwen generateSentences] retryable failure: $error');
       }
     }
     if (lastError != null) {
-      debugPrint('[Qwen generateSentences] recovered after retry: $lastError');
+      yuqiaoDebugLog('[Qwen generateSentences] recovered after retry: $lastError');
     }
     final seen = <String>{};
     final sentences = <String>[];
@@ -11973,7 +13094,7 @@ class QwenService {
   Future<List<String>> recommendNextOptions(
       CandidateRecommendationRequest request) async {
     _ensureConfigured();
-    debugPrint(
+    yuqiaoDebugLog(
       '[Qwen recommendNextOptions] intent=${request.intent}, '
       'step=${request.stepTitle}, selected=${request.selectedKeywords.join('/')}, '
       'excluded=${request.excludeOptions.length}',
@@ -12012,7 +13133,7 @@ class QwenService {
         .where((item) => item.isNotEmpty)
         .take(12)
         .toList();
-    debugPrint(
+    yuqiaoDebugLog(
       '[Qwen recommendNextOptions] returned=${options.length} '
       'options=${options.join('/')}',
     );
@@ -12024,7 +13145,7 @@ class QwenService {
     QwenCancellationToken? cancellationToken,
   }) async {
     _ensureConfigured();
-    debugPrint(
+    yuqiaoDebugLog(
       '[Qwen guided stuck] slot=${request.slotKey} '
       'diversify=${request.diversificationLevel} '
       'excluded=${request.excludeOptions.length}',
@@ -12049,7 +13170,7 @@ class QwenService {
               '用户明确提供的信息是最高优先级：只要已有片段或已确认槽位，每个候选都必须能自然接在这些信息之后，不能重新猜一个无关话题。'
               '你只负责生成指定 slot 的候选，不能返回其他类型。'
               '候选可以是词、短语或很短的句子，每项不超过 18 个汉字。'
-              'semanticGroup 表示候选代表的不同语义方向；前四项必须尽量属于不同方向，不能只是同义改写。'
+              'semanticGroup 表示候选代表的不同语义方向；前 ${request.displayCount} 项必须尽量属于不同方向，不能只是同义改写。'
               '地点、时间、历史词和个人词只能在符合当前 slot 且与用户已选内容连贯时使用。'
               '只返回 JSON 对象：'
               '{"candidates":[{"text":"候选","slot":"指定slot","semanticGroup":"语义方向"}]}。',
@@ -12067,7 +13188,7 @@ class QwenService {
               '个人词仅在与用户信息直接相关时使用：${request.personalWords.join(' / ')}\n'
               '${request.excludeOptions.isEmpty ? '' : '禁止重复：${request.excludeOptions.join(' / ')}\n'}'
               '${request.diversificationLevel > 0 ? '这是用户点击“换一组”后的第 ${request.diversificationLevel + 1} 组，必须重新基于已选内容生成，不要复用上一组语义方向，也不要只换同义词。\n' : ''}'
-              '返回 8 到 12 个候选，严格保持 slot 为 ${request.slotKey}。',
+              '返回 ${math.max(8, request.displayCount + 4)} 到 12 个候选，严格保持 slot 为 ${request.slotKey}。',
         },
       ],
     }, cancellationToken: cancellationToken);
@@ -12113,7 +13234,7 @@ class QwenService {
       ));
       if (candidates.length == 12) break;
     }
-    debugPrint(
+    yuqiaoDebugLog(
       '[Qwen guided stuck] raw=${rawCandidates.length} '
       'accepted=${candidates.length} rejected=$rejected '
       'options=${candidates.map((item) => '${item.semanticGroup}:${item.text}').join('/')}',
@@ -12126,7 +13247,7 @@ class QwenService {
     QwenCancellationToken? cancellationToken,
   }) async {
     _ensureConfigured();
-    debugPrint(
+    yuqiaoDebugLog(
         '[Qwen conversation] transcript=${request.transcript.length} chars');
     final response = await _post({
       'model': _recommendModel,
@@ -12186,7 +13307,7 @@ class QwenService {
       }
       options.add('$type：$content');
     }
-    debugPrint('[Qwen conversation] returned=${options.join('/')}');
+    yuqiaoDebugLog('[Qwen conversation] returned=${options.join('/')}');
     return options;
   }
 
@@ -12591,7 +13712,7 @@ class QwenService {
         final area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]);
         if (area < 400 || area > 950000) continue;
         refined[index] = bbox;
-        debugPrint(
+        yuqiaoDebugLog(
           '[Camera bbox refine] index=$index confidence=$confidence bbox=$bbox',
         );
       }
@@ -12607,7 +13728,7 @@ class QwenService {
         ],
       );
     } catch (error) {
-      debugPrint('[Camera bbox refine] skipped: $error');
+      yuqiaoDebugLog('[Camera bbox refine] skipped: $error');
       return recognition;
     }
   }
@@ -12728,7 +13849,7 @@ class QwenService {
               matchingEvidence: evidence,
               conflictingEvidence: conflicts,
             );
-        debugPrint(
+        yuqiaoDebugLog(
           '[Personal object match] candidate=$index id=$id '
           'confidence=$confidence evidence=${evidence.length} '
           'conflicts=${conflicts.length} accepted=$acceptedMatch',
@@ -12745,7 +13866,7 @@ class QwenService {
         ],
       );
     } catch (error) {
-      debugPrint('[Personal object match] verification skipped: $error');
+      yuqiaoDebugLog('[Personal object match] verification skipped: $error');
       return recognition;
     }
   }
@@ -12783,7 +13904,7 @@ class QwenService {
     QwenCancellationToken? cancellationToken,
   }) async {
     final uri = Uri.parse(_baseUrl);
-    debugPrint('[Qwen API] POST $uri model=${body['model']}');
+    yuqiaoDebugLog('[Qwen API] POST $uri model=${body['model']}');
     const retryableStatusCodes = {429, 500, 502, 503, 504};
     Object? lastError;
     for (var attempt = 1; attempt <= 2; attempt++) {
@@ -12804,14 +13925,14 @@ class QwenService {
         final result = await http.Response.fromStream(streamed);
         cancellationToken?.throwIfCancelled();
         if (result.statusCode >= 200 && result.statusCode < 300) {
-          debugPrint('[Qwen API] success ${result.statusCode}');
+          yuqiaoDebugLog('[Qwen API] success ${result.statusCode}');
           final decoded = jsonDecode(utf8.decode(result.bodyBytes));
           if (decoded is! Map<String, dynamic>) {
             throw const QwenException('Qwen API 返回格式不是 JSON 对象。');
           }
           return decoded;
         }
-        debugPrint('[Qwen API] error ${result.statusCode}: ${result.body}');
+        yuqiaoDebugLog('[Qwen API] error ${result.statusCode}: ${result.body}');
         if (!retryableStatusCodes.contains(result.statusCode) || attempt == 2) {
           throw QwenException(
             'Qwen API 请求失败：${result.statusCode} ${result.body}',
@@ -12960,7 +14081,7 @@ class QwenService {
         .toList();
     final rawBbox = json['bbox'];
     final bbox = normalizeModelBoundingBox(rawBbox);
-    debugPrint('[Camera bbox] object=${objectName is String ? objectName : ''} '
+    yuqiaoDebugLog('[Camera bbox] object=${objectName is String ? objectName : ''} '
         'raw=$rawBbox normalized=$bbox');
     return ObjectCandidate(
       objectName: objectName is String ? objectName.trim() : '',
@@ -13037,6 +14158,8 @@ class LocalStore implements LocationDataStore {
   static const String _recentKey = 'recent_expressions';
   static const String _favoriteKey = 'favorite_expressions';
   static const String _vocabularyKey = 'vocabulary_entries';
+  static const String _expressionPreferenceKey = 'expression_preference_v2';
+  static const String _autoStuckDetectionKey = 'auto_stuck_detection_enabled';
   static const String _locationEnabledKey = 'location_recommendation_enabled';
   static const String _locationDataKey = 'location_recommendation_data';
 
@@ -13089,6 +14212,39 @@ class LocalStore implements LocationDataStore {
     final prefs = await SharedPreferences.getInstance();
     final encoded = entries.map((entry) => jsonEncode(entry.toJson())).toList();
     await prefs.setStringList(_vocabularyKey, encoded);
+  }
+
+  Future<ExpressionPreference> loadExpressionPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_expressionPreferenceKey);
+    if (raw == null || raw.isEmpty) return const ExpressionPreference();
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        return ExpressionPreference.fromJson(decoded);
+      }
+    } catch (_) {
+      return const ExpressionPreference();
+    }
+    return const ExpressionPreference();
+  }
+
+  Future<void> saveExpressionPreference(ExpressionPreference preference) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _expressionPreferenceKey,
+      jsonEncode(preference.toJson()),
+    );
+  }
+
+  Future<bool> loadAutoStuckDetectionEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_autoStuckDetectionKey) ?? false;
+  }
+
+  Future<void> saveAutoStuckDetectionEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_autoStuckDetectionKey, enabled);
   }
 
   @override
@@ -13225,6 +14381,7 @@ class CandidateRecommendationRequest {
     this.slotLabel = '内容',
     this.timeText = '',
     this.locationText = '',
+    this.displayCount = 4,
     this.diversificationLevel = 0,
   });
 
@@ -13238,6 +14395,7 @@ class CandidateRecommendationRequest {
   final String slotLabel;
   final String timeText;
   final String locationText;
+  final int displayCount;
   final int diversificationLevel;
 }
 
@@ -13651,6 +14809,16 @@ const List<_CandidateCardStyle> _candidateCardStyles = [
     background: Color(0xFFFFC9CC),
     iconBackground: Color(0xFFFFE5E6),
     shadow: Color(0xFFFF7B82),
+  ),
+  _CandidateCardStyle(
+    background: Color(0xFFD8E5DF),
+    iconBackground: Color(0xFFEAF1ED),
+    shadow: Color(0xFF8FA99D),
+  ),
+  _CandidateCardStyle(
+    background: Color(0xFFE8D8CA),
+    iconBackground: Color(0xFFF4E9DE),
+    shadow: Color(0xFFC2A084),
   ),
 ];
 

@@ -1,8 +1,12 @@
 package com.example.yuqiao_app
 
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
+import android.view.View
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -13,6 +17,18 @@ class MainActivity : FlutterActivity() {
     private val channelName = "com.example.yuqiao_app/gallery"
     private val pickGalleryRequest = 1001
     private var pendingResult: MethodChannel.Result? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.navigationBarColor = Color.rgb(0xF7, 0xF2, 0xEA)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            window.decorView.systemUiVisibility =
+                window.decorView.systemUiVisibility or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)

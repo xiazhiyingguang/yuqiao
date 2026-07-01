@@ -8,6 +8,14 @@ import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_icons.dart';
+
+const bool kProfileDemoDebugLogs = false;
+
+void _profileDemoDebugLog(String message) {
+  if (kProfileDemoDebugLogs) debugPrint(message);
+}
+
 void main() {
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
@@ -32,7 +40,7 @@ class ProfileCenterDemoPage extends StatelessWidget {
             avatarImage: null,
             backgroundImage: null,
             onEditProfile: () {
-              debugPrint('点击编辑个人资料');
+              _profileDemoDebugLog('点击编辑个人资料');
             },
           ),
         ),
@@ -117,11 +125,16 @@ class YuqiaoPersonalCenter extends StatefulWidget {
     required this.placeCount,
     required this.locationRecommendationEnabled,
     required this.personalizedLearningEnabled,
+    required this.autoStuckDetectionEnabled,
+    required this.expressionPreferenceSummary,
     required this.onLocationRecommendationChanged,
     required this.onPersonalizedLearningChanged,
+    required this.onAutoStuckDetectionChanged,
+    required this.onOpenExpressionPreferences,
     required this.onClearPersonalizedLearningData,
     required this.onOpenLocationMemory,
     required this.personalObjectCount,
+    this.onOpenYuqiaoMemory,
     this.onOpenPersonalObjects,
     this.unconfirmedPlaceCount = 0,
     this.avatarImage,
@@ -133,11 +146,16 @@ class YuqiaoPersonalCenter extends StatefulWidget {
   final int placeCount;
   final bool locationRecommendationEnabled;
   final bool personalizedLearningEnabled;
+  final bool autoStuckDetectionEnabled;
+  final String expressionPreferenceSummary;
   final ValueChanged<bool> onLocationRecommendationChanged;
   final ValueChanged<bool> onPersonalizedLearningChanged;
+  final ValueChanged<bool> onAutoStuckDetectionChanged;
+  final VoidCallback onOpenExpressionPreferences;
   final VoidCallback onClearPersonalizedLearningData;
   final VoidCallback onOpenLocationMemory;
   final int personalObjectCount;
+  final VoidCallback? onOpenYuqiaoMemory;
   final VoidCallback? onOpenPersonalObjects;
   final int unconfirmedPlaceCount;
   final ImageProvider? avatarImage;
@@ -214,11 +232,15 @@ class _YuqiaoPersonalCenterState extends State<YuqiaoPersonalCenter> {
           )
         : widget.avatarImage;
 
+    final bottomPadding = MediaQuery.viewPaddingOf(context).bottom;
+    final topPadding = MediaQuery.viewPaddingOf(context).top;
+
     return Stack(
       children: [
         const Positioned.fill(child: _SoftPageBackground()),
         ListView(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+          padding:
+              EdgeInsets.fromLTRB(20, topPadding + 8, 20, bottomPadding + 96),
           children: [
             RepaintBoundary(
               child: ProfileHeroCard(
@@ -240,11 +262,16 @@ class _YuqiaoPersonalCenterState extends State<YuqiaoPersonalCenter> {
             _SettingsPanel(
               locationEnabled: widget.locationRecommendationEnabled,
               personalizedLearningEnabled: widget.personalizedLearningEnabled,
+              autoStuckDetectionEnabled: widget.autoStuckDetectionEnabled,
+              expressionPreferenceSummary: widget.expressionPreferenceSummary,
               onLocationChanged: widget.onLocationRecommendationChanged,
               onPersonalizedLearningChanged:
                   widget.onPersonalizedLearningChanged,
+              onAutoStuckDetectionChanged: widget.onAutoStuckDetectionChanged,
+              onOpenExpressionPreferences: widget.onOpenExpressionPreferences,
               onClearPersonalizedLearningData:
                   widget.onClearPersonalizedLearningData,
+              onOpenYuqiaoMemory: widget.onOpenYuqiaoMemory,
               onOpenLocationMemory: widget.onOpenLocationMemory,
               personalObjectCount: widget.personalObjectCount,
               onOpenPersonalObjects: widget.onOpenPersonalObjects,
@@ -441,7 +468,7 @@ class _ProfileSettingsPageState extends State<_ProfileSettingsPage> {
                           ],
                         ),
                         child: Icon(
-                          Icons.arrow_back_ios_new_rounded,
+                          YuqiaoIcons.back,
                           color: Colors.black.withOpacity(0.70),
                           size: 20,
                         ),
@@ -526,7 +553,7 @@ class _ProfileSettingsPageState extends State<_ProfileSettingsPage> {
                               ),
                             ),
                             child: const Icon(
-                              Icons.camera_alt_rounded,
+                              YuqiaoIcons.camera,
                               size: 18,
                               color: Colors.white,
                             ),
@@ -681,7 +708,7 @@ class _ProfileSettingsPageState extends State<_ProfileSettingsPage> {
                         contentPadding: const EdgeInsets.symmetric(
                             horizontal: 18, vertical: 14),
                         suffixIcon: Icon(
-                          Icons.edit_rounded,
+                          YuqiaoIcons.edit,
                           size: 20,
                           color: Colors.black.withOpacity(0.3),
                         ),
@@ -815,13 +842,13 @@ class _MockStatusBar extends StatelessWidget {
             child: Row(
               children: [
                 Icon(
-                  Icons.signal_cellular_4_bar_rounded,
+                  YuqiaoIcons.signal,
                   size: 15,
                   color: Colors.black.withValues(alpha: 0.82),
                 ),
                 const SizedBox(width: 4),
                 Icon(
-                  Icons.wifi_rounded,
+                  YuqiaoIcons.wifi,
                   size: 15,
                   color: Colors.black.withValues(alpha: 0.82),
                 ),
@@ -924,7 +951,7 @@ class ProfileHeroCard extends StatelessWidget {
             top: 22,
             left: 18,
             child: _TopChip(
-              icon: Icons.article_rounded,
+              icon: YuqiaoIcons.article,
               title: '我的词汇',
               count: wordCount,
               iconColor: const Color(0xFFD9A251),
@@ -934,7 +961,7 @@ class ProfileHeroCard extends StatelessWidget {
             top: 22,
             right: 18,
             child: _TopChip(
-              icon: Icons.location_on_rounded,
+              icon: YuqiaoIcons.location,
               title: '常去地点',
               count: placeCount,
               iconColor: const Color(0xFFF4D84A),
@@ -1168,7 +1195,7 @@ class _DefaultAvatarPlaceholder extends StatelessWidget {
       ),
       child: Center(
         child: Icon(
-          Icons.person_rounded,
+          YuqiaoIcons.person,
           size: 58,
           color: Colors.white.withValues(alpha: 0.88),
         ),
@@ -1396,9 +1423,14 @@ class _SettingsPanel extends StatelessWidget {
   const _SettingsPanel({
     this.locationEnabled = false,
     this.personalizedLearningEnabled = true,
+    this.autoStuckDetectionEnabled = false,
+    this.expressionPreferenceSummary = '少 · 图文一起',
     this.onLocationChanged,
     this.onPersonalizedLearningChanged,
+    this.onAutoStuckDetectionChanged,
+    this.onOpenExpressionPreferences,
     this.onClearPersonalizedLearningData,
+    this.onOpenYuqiaoMemory,
     this.onOpenLocationMemory,
     this.personalObjectCount = 0,
     this.onOpenPersonalObjects,
@@ -1406,9 +1438,14 @@ class _SettingsPanel extends StatelessWidget {
 
   final bool locationEnabled;
   final bool personalizedLearningEnabled;
+  final bool autoStuckDetectionEnabled;
+  final String expressionPreferenceSummary;
   final ValueChanged<bool>? onLocationChanged;
   final ValueChanged<bool>? onPersonalizedLearningChanged;
+  final ValueChanged<bool>? onAutoStuckDetectionChanged;
+  final VoidCallback? onOpenExpressionPreferences;
   final VoidCallback? onClearPersonalizedLearningData;
+  final VoidCallback? onOpenYuqiaoMemory;
   final VoidCallback? onOpenLocationMemory;
   final int personalObjectCount;
   final VoidCallback? onOpenPersonalObjects;
@@ -1416,8 +1453,7 @@ class _SettingsPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 242,
-      padding: const EdgeInsets.symmetric(horizontal: 19, vertical: 6),
+      padding: const EdgeInsets.fromLTRB(18, 6, 18, 8),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.58),
         borderRadius: BorderRadius.circular(30),
@@ -1432,15 +1468,32 @@ class _SettingsPanel extends StatelessWidget {
       child: Column(
         children: [
           _SettingRow(
+            title: '语桥记忆',
+            subtitle: '看看语桥学会了什么',
+            onTap: onOpenYuqiaoMemory,
+            trailing: const Icon(
+              YuqiaoIcons.sparkle,
+              color: Color(0xFF8E8A84),
+            ),
+          ),
+          const _ThinDivider(),
+          _SettingRow(
             title: '我的物品',
             subtitle: '已保存 $personalObjectCount 件个人物品',
-            trailing: IconButton(
-              tooltip: '管理我的物品',
-              onPressed: onOpenPersonalObjects,
-              icon: const Icon(
-                Icons.chevron_right_rounded,
-                color: Color(0xFF8E8A84),
-              ),
+            onTap: onOpenPersonalObjects,
+            trailing: const Icon(
+              YuqiaoIcons.forward,
+              color: Color(0xFF8E8A84),
+            ),
+          ),
+          const _ThinDivider(),
+          _SettingRow(
+            title: '表达偏好',
+            subtitle: expressionPreferenceSummary,
+            onTap: onOpenExpressionPreferences,
+            trailing: const Icon(
+              YuqiaoIcons.forward,
+              color: Color(0xFF8E8A84),
             ),
           ),
           const _ThinDivider(),
@@ -1455,27 +1508,23 @@ class _SettingsPanel extends StatelessWidget {
           ),
           const _ThinDivider(),
           _SettingRow(
+            title: '自动卡顿检测',
+            subtitle: '对话模式中疑似卡顿时轻震提示，默认关闭',
+            trailing: _TwoOptionSwitch(
+              left: '关闭',
+              right: '开启',
+              rightSelected: autoStuckDetectionEnabled,
+              onChanged: onAutoStuckDetectionChanged,
+            ),
+          ),
+          const _ThinDivider(),
+          _SettingRow(
             title: '地点词汇推荐',
             subtitle: '根据位置推荐常用表达',
             trailing: _LocationControl(
               enabled: locationEnabled,
               onChanged: onLocationChanged,
               onOpenMemory: onOpenLocationMemory,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              '学习记录只保存在本机，不会上传；清除后不影响收藏、词库和个人物品。',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 10,
-                height: 1.25,
-                fontWeight: FontWeight.w600,
-                color: const Color(0xFFB0ADA8).withValues(alpha: 0.82),
-              ),
             ),
           ),
         ],
@@ -1488,49 +1537,51 @@ class _SettingRow extends StatelessWidget {
   final String title;
   final String subtitle;
   final Widget trailing;
+  final VoidCallback? onTap;
 
   const _SettingRow({
     required this.title,
     required this.subtitle,
     required this.trailing,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 67,
-      child: Row(
-        children: [
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.only(top: 7),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: const Color(0xFF54504C).withValues(alpha: 0.96),
-                    ),
+    final content = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 50),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: const Color(0xFF54504C).withValues(alpha: 0.96),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: const Color(0xFFB0ADA8).withValues(alpha: 0.88),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
-          ),
-          trailing,
-        ],
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 132),
+              child: trailing,
+            ),
+          ],
+        ),
       ),
+    );
+    if (onTap == null) return content;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: content,
     );
   }
 }
@@ -1566,7 +1617,7 @@ class _TwoOptionSwitch extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onTap: onChanged == null ? null : () => onChanged!(!rightSelected),
       child: Container(
-        width: 98,
+        width: 92,
         height: 34,
         padding: const EdgeInsets.all(4),
         decoration: BoxDecoration(
@@ -1580,7 +1631,7 @@ class _TwoOptionSwitch extends StatelessWidget {
               alignment:
                   rightSelected ? Alignment.centerRight : Alignment.centerLeft,
               child: Container(
-                width: 45,
+                width: 42,
                 height: 26,
                 decoration: BoxDecoration(
                   color: Colors.white,
@@ -1629,11 +1680,11 @@ class _BottomNavBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const items = [
-      Icons.text_fields_rounded,
-      Icons.menu_book_rounded,
-      Icons.grid_view_rounded,
-      Icons.collections_bookmark_rounded,
-      Icons.person_rounded,
+      YuqiaoIcons.text,
+      YuqiaoIcons.dictionary,
+      YuqiaoIcons.grid,
+      YuqiaoIcons.collection,
+      YuqiaoIcons.person,
     ];
 
     return SizedBox(
@@ -1726,18 +1777,6 @@ class _PersonalizedLearningControl extends StatelessWidget {
           rightSelected: enabled,
           onChanged: onChanged,
         ),
-        const SizedBox(width: 2),
-        IconButton(
-          tooltip: '清除学习记录',
-          onPressed: onClearData == null ? null : () => _confirmClear(context),
-          constraints: const BoxConstraints.tightFor(width: 30, height: 34),
-          padding: EdgeInsets.zero,
-          icon: const Icon(
-            Icons.delete_outline_rounded,
-            size: 18,
-            color: Color(0xFF8E8A84),
-          ),
-        ),
       ],
     );
   }
@@ -1765,19 +1804,38 @@ class _LocationControl extends StatelessWidget {
           rightSelected: enabled,
           onChanged: onChanged,
         ),
-        const SizedBox(width: 2),
-        IconButton(
-          tooltip: '地点记忆管理',
-          onPressed: onOpenMemory,
-          constraints: const BoxConstraints.tightFor(width: 30, height: 34),
-          padding: EdgeInsets.zero,
-          icon: const Icon(
-            Icons.chevron_right_rounded,
-            size: 20,
-            color: Color(0xFF8E8A84),
+      ],
+    );
+  }
+}
+
+class _CompactActionIcon extends StatelessWidget {
+  const _CompactActionIcon({
+    required this.tooltip,
+    required this.icon,
+    this.onPressed,
+  });
+
+  final String tooltip;
+  final Widget icon;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onPressed,
+        child: Opacity(
+          opacity: onPressed == null ? 0.38 : 1,
+          child: SizedBox(
+            width: 28,
+            height: 34,
+            child: Center(child: icon),
           ),
         ),
-      ],
+      ),
     );
   }
 }
