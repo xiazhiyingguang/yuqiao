@@ -39,3 +39,8 @@ mooncat/
 
 # Plan files
 .claude/
+
+# Local reference PDFs and temporary screenshots
+categories-en.pdf
+categories-fr.pdf
+tmp_yuqiao_*.png
