@@ -3,6 +3,7 @@ import 'conversation_terms.dart';
 import 'expression_habits.dart';
 import 'location_recommendation.dart';
 import 'personal_objects.dart';
+import 'user_learning.dart';
 
 enum MemoryInsightNodeType {
   self,
@@ -82,8 +83,11 @@ class MemoryInsightService {
     List<CompanionLearnedExpression> companionLearnedExpressions = const [],
     CompanionActionBias companionActionBias =
         const CompanionActionBias(accepted: {}, rejected: {}),
+    UserPreferenceProfile? userPreferenceProfile,
     required bool personalizedLearningEnabled,
   }) {
+    final effectiveUserPreferenceProfile =
+        userPreferenceProfile ?? UserPreferenceProfile.empty;
     final learnedExpressions = _uniqueTexts([
       ...expressionHabits.map((habit) => habit.text),
       ...favoriteExpressions,
@@ -108,6 +112,9 @@ class MemoryInsightService {
         .map((item) => item.displayLine)
         .toList(growable: false);
     final actionPreferenceItems = _actionPreferenceItems(companionActionBias);
+    final profileItems = _profileItems(effectiveUserPreferenceProfile);
+    final learningLoopItems =
+        effectiveUserPreferenceProfile.stats.displayLines(limit: 5);
 
     final topPlace = _topPlace(locationController);
     final topPlaceWords = topPlace == null
@@ -145,6 +152,7 @@ class MemoryInsightService {
             '个性化学习已开启，语桥会在本机记录你常用的表达。'
           else
             '个性化学习已关闭，当前只展示本机已有记忆。',
+          ...learningLoopItems.take(2),
           '不会上传精确地点、个人物品或对话特殊词。',
         ],
       ),
@@ -216,6 +224,15 @@ class MemoryInsightService {
           detailTitle: '智能体行动偏好',
           detailLines: actionPreferenceItems,
         ),
+      if (profileItems.isNotEmpty)
+        MemoryInsightNode(
+          id: 'profile',
+          title: '更懂你的表达',
+          subtitle: '长期偏好摘要',
+          type: MemoryInsightNodeType.agent,
+          detailTitle: '长期学习画像',
+          detailLines: profileItems,
+        ),
     ];
 
     return MemoryInsightSnapshot(
@@ -223,6 +240,22 @@ class MemoryInsightService {
       personalizedLearningEnabled: personalizedLearningEnabled,
       nodes: nodes.take(7).toList(growable: false),
       evidenceCards: [
+        if (profileItems.isNotEmpty)
+          MemoryEvidenceCard(
+            title: '长期学习画像',
+            subtitle: '来自确认、播报、保存、训练和跳过等本机行为',
+            items: profileItems,
+            emptyText: '还没有形成稳定的长期偏好摘要。',
+            type: MemoryInsightNodeType.agent,
+          ),
+        if (learningLoopItems.isNotEmpty)
+          MemoryEvidenceCard(
+            title: '表达闭环状态',
+            subtitle: '系统如何把你的操作转成下一次更贴近的候选',
+            items: learningLoopItems,
+            emptyText: '还没有记录到完整的表达反馈闭环。',
+            type: MemoryInsightNodeType.agent,
+          ),
         MemoryEvidenceCard(
           title: '常用表达',
           subtitle: '语桥会优先记住你确认、收藏和播报过的话',
@@ -315,6 +348,38 @@ class MemoryInsightService {
       final action = item.positive ? '确认' : '跳过';
       return '${item.type.label} · $action ${item.count}次';
     }).toList(growable: false);
+  }
+
+  static List<String> _profileItems(UserPreferenceProfile profile) {
+    if (!profile.hasSignal) return const [];
+    final summary = profile.displaySummaryLines(limit: 6);
+    if (summary.isNotEmpty) return summary;
+    final items = <String>[
+      ...profile.topExpressions.take(3).map(
+            (signal) => '常用表达趋势 · ${signal.latestText}',
+          ),
+      ...profile.intentPatterns.take(3).map(
+            (signal) => '常用意图模式 · ${signal.label}',
+          ),
+      ...profile.semanticPreferences.take(3).map(
+            (signal) => '语义偏好 · ${signal.label}',
+          ),
+      if (profile.expressionStyle.summary.isNotEmpty)
+        profile.expressionStyle.displaySummary,
+      ...profile.placeIntentPatterns.take(2).map(
+            (signal) => '场景化表达模式 · ${signal.label}',
+          ),
+      ...profile.objectPatterns.take(2).map(
+            (signal) => '物品相关表达模式 · ${signal.label}',
+          ),
+      ...profile.rejectedSemanticPreferences.take(2).map(
+            (signal) => '较少选择的语义 · ${signal.label}',
+          ),
+      ...profile.rejectedExpressions.take(2).map(
+            (signal) => '较少选择 · ${signal.latestText}',
+          ),
+    ];
+    return _uniqueDisplayItems(items).take(6).toList(growable: false);
   }
 
   static PlaceCluster? _topPlace(

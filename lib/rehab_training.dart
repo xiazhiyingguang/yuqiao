@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -7,8 +8,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'expression_habits.dart';
 import 'mulberry_symbols.dart';
 import 'personal_objects.dart';
+import 'user_learning.dart';
 
 class RehabTrainingProgress {
   const RehabTrainingProgress({
@@ -626,9 +629,11 @@ class RehabTrainingPage extends StatefulWidget {
   const RehabTrainingPage({
     super.key,
     this.initialMode = RehabTrainingMode.mixed,
+    this.onLearningProfileChanged,
   });
 
   final RehabTrainingMode initialMode;
+  final Future<void> Function()? onLearningProfileChanged;
 
   @override
   State<RehabTrainingPage> createState() => _RehabTrainingPageState();
@@ -636,6 +641,8 @@ class RehabTrainingPage extends StatefulWidget {
 
 class _RehabTrainingPageState extends State<RehabTrainingPage> {
   final RehabTrainingStore _store = RehabTrainingStore();
+  final ExpressionHabitStore _habitStore = ExpressionHabitStore();
+  final UserLearningStore _learningStore = UserLearningStore();
   final PersonalObjectStore _personalObjectStore = PersonalObjectStore();
   final FlutterTts _tts = FlutterTts();
   List<RehabTrainingWord> _words = const [];
@@ -653,6 +660,7 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
   final Set<String> _sessionWords = {};
   final Set<String> _newlyMastered = {};
   bool _showingSummary = false;
+  String _learningReceiptText = '';
 
   @override
   void initState() {
@@ -704,6 +712,7 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
       );
       _selectedText = null;
       _lastCorrect = null;
+      _learningReceiptText = '';
     });
     if (speak) {
       Future<void>.delayed(
@@ -767,6 +776,26 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
     }
 
     await _store.record(question.answer.text, correct: correct);
+    final learningEnabled = await _habitStore.loadEnabled();
+    var learningReceiptText = '';
+    if (learningEnabled) {
+      await _learningStore.record(UserLearningEvent(
+        feature: 'training',
+        action: correct ? 'accepted' : 'rejected',
+        text: question.answer.text,
+        normalizedText: MulberrySymbolResolver.normalize(question.answer.text),
+        intentTag: correct ? 'training_correct' : 'training_review',
+        objectTag: question.answer.isPersonalObject
+            ? MulberrySymbolResolver.normalize(question.answer.text)
+            : '',
+        placeType: 'unknown',
+        timeBucket: 'training',
+        slotName: 'topic',
+        createdAt: DateTime.now(),
+      ));
+      await widget.onLearningProfileChanged?.call();
+      learningReceiptText = correct ? '已学习这次选择' : '已加入复习画像';
+    }
     final progress = await _store.loadAll();
     if (!mounted) return;
 
@@ -777,11 +806,20 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
       _newlyMastered.add(question.answer.text);
     }
 
-    setState(() => _progress = progress);
+    setState(() {
+      _progress = progress;
+      _learningReceiptText = learningReceiptText;
+    });
     await _tts.stop();
     await _tts.speak(
       correct ? '答对了，${question.answer.text}' : '正确答案是${question.answer.text}',
     );
+  }
+
+  String _resultTextFor(RehabTrainingQuestion question) {
+    final base = _lastCorrect == true ? '答对了' : '正确答案：${question.answer.text}';
+    if (_learningReceiptText.isEmpty) return base;
+    return '$base · $_learningReceiptText';
   }
 
   void _handleBack() {
@@ -1070,9 +1108,7 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
                           const SizedBox(width: 8),
                           Flexible(
                             child: Text(
-                              _lastCorrect!
-                                  ? '答对了'
-                                  : '正确答案：${question.answer.text}',
+                              _resultTextFor(question),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(

@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import 'app_icons.dart';
+import 'companion_agent.dart';
+import 'location_recommendation.dart';
 import 'personal_objects.dart';
 
 class PersonalObjectEditSheet extends StatefulWidget {
@@ -231,11 +233,15 @@ class PersonalObjectManagementPage extends StatefulWidget {
   const PersonalObjectManagementPage({
     super.key,
     required this.store,
+    required this.companionAgent,
+    required this.personalizedLearningEnabled,
     required this.onAdd,
     required this.onChanged,
   });
 
   final PersonalObjectStore store;
+  final CompanionAgentController companionAgent;
+  final bool personalizedLearningEnabled;
   final Future<void> Function() onAdd;
   final Future<void> Function() onChanged;
 
@@ -286,8 +292,13 @@ class _PersonalObjectManagementPageState
     );
     if (draft == null) return;
     await widget.store.update(object, draft);
+    await _recordPersonalObjectDraft(
+      draft,
+      action: CompanionFeedbackAction.saved,
+    );
     await widget.onChanged();
     await _reload();
+    _showLearningReceipt('已学习这次物品修改');
   }
 
   Future<void> _delete(PersonalObject object) async {
@@ -310,8 +321,65 @@ class _PersonalObjectManagementPageState
     );
     if (confirmed != true) return;
     await widget.store.delete(object);
+    await _recordPersonalObject(
+      object.displayName,
+      action: CompanionFeedbackAction.deleted,
+      prompt: object.category,
+    );
     await widget.onChanged();
     await _reload();
+    _showLearningReceipt('已从画像里降低这个物品的优先级');
+  }
+
+  Future<void> _recordPersonalObjectDraft(
+    PersonalObjectDraft draft, {
+    required CompanionFeedbackAction action,
+  }) async {
+    await _recordPersonalObject(
+      draft.displayName,
+      action: action,
+      prompt: draft.category,
+      objectTag: draft.displayName,
+    );
+    for (final expression in draft.commonExpressions.take(3)) {
+      await _recordPersonalObject(
+        expression,
+        action: action,
+        prompt: draft.displayName,
+        slot: RecommendationSlot.sentence,
+        objectTag: draft.displayName,
+      );
+    }
+  }
+
+  Future<void> _recordPersonalObject(
+    String text, {
+    required CompanionFeedbackAction action,
+    String prompt = '',
+    RecommendationSlot slot = RecommendationSlot.actionOrObject,
+    String? objectTag,
+  }) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return;
+    await widget.companionAgent.recordInteraction(
+      text: clean,
+      feature: 'personalObject',
+      action: action,
+      prompt: prompt,
+      slot: slot,
+      objectTag: objectTag ?? clean,
+    );
+  }
+
+  void _showLearningReceipt(String learnedMessage) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          widget.personalizedLearningEnabled ? learnedMessage : '已保存，个性化学习已关闭',
+        ),
+      ),
+    );
   }
 
   @override

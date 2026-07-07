@@ -12,12 +12,14 @@ import 'location_recommendation.dart';
 import 'memory_insights.dart';
 import 'mulberry_symbols.dart';
 import 'personal_objects.dart';
+import 'user_learning.dart';
 
 class _MemoryInsightPageData {
   const _MemoryInsightPageData({
     required this.conversationTerms,
     required this.companionLearnedExpressions,
     required this.companionActionBias,
+    this.userPreferenceProfile,
   });
 
   static const empty = _MemoryInsightPageData(
@@ -32,6 +34,7 @@ class _MemoryInsightPageData {
   final List<ConversationTerm> conversationTerms;
   final List<CompanionLearnedExpression> companionLearnedExpressions;
   final CompanionActionBias companionActionBias;
+  final UserPreferenceProfile? userPreferenceProfile;
 }
 
 class YuqiaoMemoryPage extends StatefulWidget {
@@ -85,14 +88,26 @@ class _YuqiaoMemoryPageState extends State<YuqiaoMemoryPage> {
   Future<_MemoryInsightPageData> _loadMemoryData() async {
     final termsFuture = ConversationTermStore().loadAll();
     final feedbackStore = CompanionFeedbackStore();
+    final learningStore = UserLearningStore();
     final companionFuture = feedbackStore.topLearnedExpressions(limit: 8);
     final actionBiasFuture = feedbackStore.actionBiasForContextKeys(
-      const ['conversation', 'stuck', 'camera', 'expression', 'favorite'],
+      const [
+        'conversation',
+        'stuck',
+        'camera',
+        'vocabulary',
+        'personalObject',
+        'training',
+        'expression',
+        'favorite',
+      ],
     );
+    final profileFuture = learningStore.loadProfile();
     return _MemoryInsightPageData(
       conversationTerms: await termsFuture,
       companionLearnedExpressions: await companionFuture,
       companionActionBias: await actionBiasFuture,
+      userPreferenceProfile: await profileFuture,
     );
   }
 
@@ -128,6 +143,7 @@ class _YuqiaoMemoryPageState extends State<YuqiaoMemoryPage> {
           conversationTerms: data.conversationTerms,
           companionLearnedExpressions: data.companionLearnedExpressions,
           companionActionBias: data.companionActionBias,
+          userPreferenceProfile: data.userPreferenceProfile,
           personalizedLearningEnabled: widget.personalizedLearningEnabled,
         );
         return Scaffold(

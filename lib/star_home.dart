@@ -55,6 +55,7 @@ class MyApp extends StatelessWidget {
         savedPlaceCount: 0,
         onLocationRecommendationChanged: (_) {},
         onPersonalizedLearningChanged: (_) {},
+        onLearningProfileChanged: () async {},
         onAutoStuckDetectionChanged: (_) {},
         onOpenExpressionPreferences: () {},
         onClearPersonalizedLearningData: () {},
@@ -115,6 +116,7 @@ class MainInterfaceScreen extends StatefulWidget {
   final int savedPersonalObjectCount;
   final ValueChanged<bool> onLocationRecommendationChanged;
   final ValueChanged<bool> onPersonalizedLearningChanged;
+  final Future<void> Function() onLearningProfileChanged;
   final ValueChanged<bool> onAutoStuckDetectionChanged;
   final VoidCallback onOpenExpressionPreferences;
   final VoidCallback onClearPersonalizedLearningData;
@@ -140,6 +142,7 @@ class MainInterfaceScreen extends StatefulWidget {
     this.savedPersonalObjectCount = 0,
     required this.onLocationRecommendationChanged,
     required this.onPersonalizedLearningChanged,
+    required this.onLearningProfileChanged,
     required this.onAutoStuckDetectionChanged,
     required this.onOpenExpressionPreferences,
     required this.onClearPersonalizedLearningData,
@@ -270,10 +273,14 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
   }) async {
     await Navigator.of(context).push(
       CupertinoPageRoute(
-        builder: (_) => RehabTrainingPage(initialMode: mode),
+        builder: (_) => RehabTrainingPage(
+          initialMode: mode,
+          onLearningProfileChanged: widget.onLearningProfileChanged,
+        ),
       ),
     );
     await _loadTrainingProgress();
+    await widget.onLearningProfileChanged();
   }
 
   Future<void> _openRehabTrainingSummary() async {
@@ -364,10 +371,8 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
     return LayoutBuilder(
       builder: (context, constraints) {
         final systemPadding = MediaQuery.viewPaddingOf(context);
-        final height = constraints.maxHeight;
         final headerTop = systemPadding.top + 18;
         final locationTop = systemPadding.top + 86;
-        final interactionTop = math.max(systemPadding.top + 150, height * 0.20);
         return Stack(
           clipBehavior: Clip.none,
           children: [
@@ -393,11 +398,7 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
                   controller: widget.locationController!,
                 ),
               ),
-            Positioned(
-              top: interactionTop,
-              bottom: systemPadding.bottom + 70,
-              left: 0,
-              right: 0,
+            Positioned.fill(
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -819,28 +820,31 @@ class HeaderWidget extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${_greeting()}，$userName',
-              style: const TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF1C1C1E),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${_greeting()}，$userName',
+                style: const TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF1C1C1E),
+                ),
               ),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              '选择一个入口，语桥会跟着你的节奏来',
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w400,
-                color: Color(0xFF7D8896),
+              const SizedBox(height: 6),
+              const Text(
+                '选择一个入口，语桥会跟着你的节奏来',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w400,
+                  color: Color(0xFF7D8896),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
+        const SizedBox(width: 12),
         SizedBox(
           width: 48,
           height: 48,

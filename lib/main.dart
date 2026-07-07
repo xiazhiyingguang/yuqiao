@@ -8,6 +8,7 @@ import 'dart:ui';
 import 'package:camerawesome/camerawesome_plugin.dart';
 import 'package:flutter/foundation.dart' show compute, debugPrint;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
@@ -28,6 +29,7 @@ import 'personal_object_pages.dart';
 import 'personal_objects.dart';
 import 'star_home.dart' as star_ui;
 import 'stuck_expression_flow.dart';
+import 'user_learning.dart';
 import 'voice_orb_test_page.dart' show VoiceOrbPainter, VoiceDotsIndicator;
 import 'xfyun_realtime_asr_service.dart';
 
@@ -40,6 +42,25 @@ typedef HabitRecordCallback = Future<void> Function(
 });
 typedef VocabularyChangedCallback = Future<void> Function(
     List<VocabularyEntry> entries);
+
+enum YuqiaoFeature {
+  stuck,
+  camera,
+  conversation,
+  vocabulary,
+}
+
+class YuqiaoFeatureLauncher {
+  const YuqiaoFeatureLauncher({
+    required this.openFeature,
+  });
+
+  final void Function(BuildContext context, YuqiaoFeature feature) openFeature;
+
+  void open(BuildContext context, YuqiaoFeature feature) {
+    openFeature(context, feature);
+  }
+}
 
 const bool kYuqiaoDebugLogs = false;
 
@@ -54,6 +75,25 @@ const SystemUiOverlayStyle kYuqiaoSystemUiStyle = SystemUiOverlayStyle(
 
 void yuqiaoDebugLog(String message) {
   if (kYuqiaoDebugLogs) debugPrint(message);
+}
+
+void showYuqiaoLearningReceipt(
+  BuildContext context, {
+  required bool personalizedLearningEnabled,
+  required String learnedMessage,
+  required String disabledMessage,
+}) {
+  ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(
+      SnackBar(
+        content: Text(
+          personalizedLearningEnabled ? learnedMessage : disabledMessage,
+        ),
+        duration: const Duration(milliseconds: 1300),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
 }
 
 class ExpressionPreference {
@@ -116,6 +156,7 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
   final QwenService _qwenService = QwenService();
   final LocalStore _store = LocalStore();
   final ExpressionHabitStore _habitStore = ExpressionHabitStore();
+  final UserLearningStore _userLearningStore = UserLearningStore();
   final PersonalObjectStore _personalObjectStore = PersonalObjectStore();
   late final LocationRecommendationController _locationController;
   late final CompanionAgentController _companionAgent;
@@ -137,6 +178,7 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
       ..addListener(_handleLocationChanged);
     _companionAgent = CompanionAgentController(
       locationController: _locationController,
+      userLearningStore: _userLearningStore,
     );
     _loadLocalData();
   }
@@ -182,10 +224,14 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
         ? await _habitStore.loadAll()
         : const <ExpressionHabit>[];
     final vocabulary = await _store.loadVocabularyEntries();
+    final vocabularySeedVersion = await _store.loadVocabularySeedVersion();
     final personalObjects = await _personalObjectStore.loadAll();
     final conversationTerms = await ConversationTermStore().loadAll();
-    final baseVocabulary =
-        vocabulary.isEmpty ? VocabularyDefaults.entries : vocabulary;
+    final shouldMergeVocabularyDefaults = vocabulary.isEmpty ||
+        vocabularySeedVersion < VocabularyDefaults.version;
+    final baseVocabulary = shouldMergeVocabularyDefaults
+        ? _mergeVocabularyDefaults(vocabulary)
+        : vocabulary;
     final personalById = {
       for (final object in personalObjects) object.id: object,
     };
@@ -204,10 +250,13 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
             note: '我的物品',
           ),
     ];
-    if (jsonEncode(baseVocabulary.map((entry) => entry.toJson()).toList()) !=
-        jsonEncode(
-            synchronizedVocabulary.map((entry) => entry.toJson()).toList())) {
+    if (shouldMergeVocabularyDefaults ||
+        jsonEncode(baseVocabulary.map((entry) => entry.toJson()).toList()) !=
+            jsonEncode(synchronizedVocabulary
+                .map((entry) => entry.toJson())
+                .toList())) {
       await _store.saveVocabularyEntries(synchronizedVocabulary);
+      await _store.saveVocabularySeedVersion(VocabularyDefaults.version);
     }
     final effectiveFavorites = favorites.isEmpty
         ? const ['我想问医生', '我不舒服', '请再说一遍', '我想联系家人']
@@ -239,6 +288,24 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
       _personalObjects = personalObjects;
       _conversationTerms = conversationTerms;
     });
+  }
+
+  List<VocabularyEntry> _mergeVocabularyDefaults(
+    List<VocabularyEntry> vocabulary,
+  ) {
+    if (vocabulary.isEmpty) return VocabularyDefaults.entries;
+    final existingIds = vocabulary.map((entry) => entry.id).toSet();
+    final existingCategoryTexts = vocabulary
+        .map((entry) => '${entry.category.trim()}|${entry.text.trim()}')
+        .toSet();
+    return [
+      ...vocabulary,
+      for (final entry in VocabularyDefaults.entries)
+        if (!existingIds.contains(entry.id) &&
+            !existingCategoryTexts
+                .contains('${entry.category.trim()}|${entry.text.trim()}'))
+          entry,
+    ];
   }
 
   Future<void> _recordExpression(String text) async {
@@ -317,10 +384,14 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
 
   Future<void> _clearExpressionHabits() async {
     await _habitStore.clearAll();
+    await _userLearningStore.clear();
+    await CompanionFeedbackStore().clearAll();
     _locationController.updateExpressionHabits(const [], notify: false);
     _syncCompanionMemory(expressionHabits: const []);
     if (!mounted) return;
-    setState(() => _expressionHabits = const []);
+    setState(() {
+      _expressionHabits = const [];
+    });
   }
 
   Future<void> _saveVocabulary(List<VocabularyEntry> entries) async {
@@ -351,9 +422,9 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
         },
         home: HomePage(
           qwenService: _qwenService,
-        locationController: _locationController,
-        companionAgent: _companionAgent,
-        personalizedLearningEnabled: _personalizedLearningEnabled,
+          locationController: _locationController,
+          companionAgent: _companionAgent,
+          personalizedLearningEnabled: _personalizedLearningEnabled,
           autoStuckDetectionEnabled: _autoStuckDetectionEnabled,
           expressionPreference: _expressionPreference,
           recentExpressions: _recentExpressions,
@@ -425,6 +496,120 @@ class HomePage extends StatelessWidget {
   final VocabularyChangedCallback onVocabularyChanged;
   final Future<void> Function() onPersonalObjectsChanged;
 
+  YuqiaoFeatureLauncher get _featureLauncher => YuqiaoFeatureLauncher(
+        openFeature: _openFeatureFromFloatingBall,
+      );
+
+  void _openFeatureFromFloatingBall(
+    BuildContext context,
+    YuqiaoFeature feature,
+  ) {
+    locationController.refreshLocationContext();
+    Navigator.of(context).pushReplacement(_buildFeatureRoute(context, feature));
+  }
+
+  MaterialPageRoute<void> _buildFeatureRoute(
+    BuildContext context,
+    YuqiaoFeature feature,
+  ) {
+    return MaterialPageRoute<void>(
+      builder: (_) {
+        switch (feature) {
+          case YuqiaoFeature.stuck:
+            return StuckFlowPage(
+              qwenService: qwenService,
+              locationController: locationController,
+              companionAgent: companionAgent,
+              personalizedLearningEnabled: personalizedLearningEnabled,
+              vocabularyEntries: vocabularyEntries,
+              expressionHabits: expressionHabits,
+              preferredCandidateCount:
+                  expressionPreference.effectiveCandidateCount,
+              featureLauncher: _featureLauncher,
+              onHabitRecorded: onHabitRecorded,
+              onExpressionCompleted: (text) async {
+                await onExpressionCompleted(text);
+                unawaited(locationController.recordWordUsed(text, 'stuck'));
+              },
+              onFavoriteSaved: (text) async {
+                await onFavoriteSaved(text);
+                unawaited(locationController.recordWordUsed(text, 'stuck'));
+              },
+            );
+          case YuqiaoFeature.camera:
+            return CameraWordPage(
+              qwenService: qwenService,
+              locationController: locationController,
+              companionAgent: companionAgent,
+              personalizedLearningEnabled: personalizedLearningEnabled,
+              vocabularyEntries: vocabularyEntries,
+              personalObjects: personalObjects,
+              expressionHabits: expressionHabits,
+              personalObjectStore: personalObjectStore,
+              featureLauncher: _featureLauncher,
+              onPersonalObjectsChanged: onPersonalObjectsChanged,
+              onHabitRecorded: onHabitRecorded,
+              onVocabularyChanged: onVocabularyChanged,
+              onExpressionCompleted: (text) async {
+                await onExpressionCompleted(text);
+                unawaited(locationController.recordWordUsed(text, 'camera'));
+              },
+              onFavoriteSaved: (text) async {
+                await onFavoriteSaved(text);
+                unawaited(locationController.recordWordUsed(text, 'camera'));
+              },
+            );
+          case YuqiaoFeature.conversation:
+            return ConversationModePage(
+              qwenService: qwenService,
+              locationController: locationController,
+              companionAgent: companionAgent,
+              personalizedLearningEnabled: personalizedLearningEnabled,
+              recentExpressions: recentExpressions,
+              favoriteExpressions: favoriteExpressions,
+              expressionHabits: expressionHabits,
+              vocabularyEntries: vocabularyEntries,
+              featureLauncher: _featureLauncher,
+              onHabitRecorded: onHabitRecorded,
+              onExpressionCompleted: (text) async {
+                await onExpressionCompleted(text);
+                unawaited(
+                  locationController.recordWordUsed(text, 'conversation'),
+                );
+              },
+              onFavoriteSaved: (text) async {
+                await onFavoriteSaved(text);
+                unawaited(
+                  locationController.recordWordUsed(text, 'conversation'),
+                );
+              },
+            );
+          case YuqiaoFeature.vocabulary:
+            return VocabularyPage(
+              entries: vocabularyEntries,
+              onChanged: onVocabularyChanged,
+              locationController: locationController,
+              companionAgent: companionAgent,
+              personalizedLearningEnabled: personalizedLearningEnabled,
+              qwenService: qwenService,
+              personalObjects: personalObjects,
+              expressionHabits: expressionHabits,
+              personalObjectStore: personalObjectStore,
+              featureLauncher: _featureLauncher,
+              onAddPersonalObject: (objects) => _openCamera(
+                context,
+                personalObjectsOverride: objects,
+              ),
+              onOpenPersonalObjects: () => _openPersonalObjects(context),
+              onExpressionCompleted: onExpressionCompleted,
+              onFavoriteSaved: onFavoriteSaved,
+              onHabitRecorded: onHabitRecorded,
+            );
+        }
+      },
+    );
+  }
+
   Future<void> _openCamera(
     BuildContext context, {
     List<PersonalObject>? personalObjectsOverride,
@@ -435,10 +620,13 @@ class HomePage extends StatelessWidget {
         builder: (_) => CameraWordPage(
           qwenService: qwenService,
           locationController: locationController,
+          companionAgent: companionAgent,
+          personalizedLearningEnabled: personalizedLearningEnabled,
           vocabularyEntries: vocabularyEntries,
           personalObjects: personalObjectsOverride ?? personalObjects,
           expressionHabits: expressionHabits,
           personalObjectStore: personalObjectStore,
+          featureLauncher: _featureLauncher,
           onPersonalObjectsChanged: onPersonalObjectsChanged,
           onHabitRecorded: onHabitRecorded,
           onVocabularyChanged: onVocabularyChanged,
@@ -461,6 +649,8 @@ class HomePage extends StatelessWidget {
       MaterialPageRoute<void>(
         builder: (managerContext) => PersonalObjectManagementPage(
           store: personalObjectStore,
+          companionAgent: companionAgent,
+          personalizedLearningEnabled: personalizedLearningEnabled,
           onChanged: onPersonalObjectsChanged,
           onAdd: () => _openCamera(managerContext),
         ),
@@ -507,6 +697,7 @@ class HomePage extends StatelessWidget {
       savedPersonalObjectCount: personalObjects.length,
       onLocationRecommendationChanged: locationController.setEnabled,
       onPersonalizedLearningChanged: onPersonalizedLearningChanged,
+      onLearningProfileChanged: () async {},
       onAutoStuckDetectionChanged: onAutoStuckDetectionChanged,
       onOpenExpressionPreferences: () => _openExpressionPreferences(context),
       onClearPersonalizedLearningData: onClearPersonalizedLearningData,
@@ -523,10 +714,12 @@ class HomePage extends StatelessWidget {
               qwenService: qwenService,
               locationController: locationController,
               companionAgent: companionAgent,
+              personalizedLearningEnabled: personalizedLearningEnabled,
               vocabularyEntries: vocabularyEntries,
               expressionHabits: expressionHabits,
               preferredCandidateCount:
                   expressionPreference.effectiveCandidateCount,
+              featureLauncher: _featureLauncher,
               onHabitRecorded: onHabitRecorded,
               onExpressionCompleted: (text) async {
                 await onExpressionCompleted(text);
@@ -549,10 +742,12 @@ class HomePage extends StatelessWidget {
               qwenService: qwenService,
               locationController: locationController,
               companionAgent: companionAgent,
+              personalizedLearningEnabled: personalizedLearningEnabled,
               recentExpressions: recentExpressions,
               favoriteExpressions: favoriteExpressions,
               expressionHabits: expressionHabits,
               vocabularyEntries: vocabularyEntries,
+              featureLauncher: _featureLauncher,
               onHabitRecorded: onHabitRecorded,
               onExpressionCompleted: (text) async {
                 await onExpressionCompleted(text);
@@ -578,10 +773,13 @@ class HomePage extends StatelessWidget {
               entries: vocabularyEntries,
               onChanged: onVocabularyChanged,
               locationController: locationController,
+              companionAgent: companionAgent,
+              personalizedLearningEnabled: personalizedLearningEnabled,
               qwenService: qwenService,
               personalObjects: personalObjects,
               expressionHabits: expressionHabits,
               personalObjectStore: personalObjectStore,
+              featureLauncher: _featureLauncher,
               onAddPersonalObject: (objects) => _openCamera(
                 context,
                 personalObjectsOverride: objects,
@@ -594,6 +792,373 @@ class HomePage extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class YuqiaoFeatureAssistiveBall extends StatefulWidget {
+  const YuqiaoFeatureAssistiveBall({
+    super.key,
+    required this.currentFeature,
+    required this.launcher,
+    this.bottomClearance = 24,
+  });
+
+  final YuqiaoFeature currentFeature;
+  final YuqiaoFeatureLauncher launcher;
+  final double bottomClearance;
+
+  @override
+  State<YuqiaoFeatureAssistiveBall> createState() =>
+      _YuqiaoFeatureAssistiveBallState();
+}
+
+class _YuqiaoFeatureAssistiveBallState
+    extends State<YuqiaoFeatureAssistiveBall> {
+  static Offset? _lastOffset;
+  static const double _ballSize = 58;
+  static const double _margin = 14;
+
+  Offset? _offset;
+  bool _expanded = false;
+  bool _dragged = false;
+
+  List<YuqiaoFeature> get _targets => YuqiaoFeature.values
+      .where((feature) => feature != widget.currentFeature)
+      .toList(growable: false);
+
+  Offset _initialOffset(Size size, EdgeInsets safeArea) {
+    return Offset(
+      size.width - _ballSize - _margin,
+      (size.height * 0.56).clamp(
+        safeArea.top + 76,
+        size.height - safeArea.bottom - widget.bottomClearance - _ballSize,
+      ),
+    );
+  }
+
+  Offset _clampOffset(Offset value, Size size, EdgeInsets safeArea) {
+    final minY = safeArea.top + 72;
+    final maxY = math.max(
+      minY,
+      size.height - safeArea.bottom - widget.bottomClearance - _ballSize,
+    );
+    return Offset(
+      value.dx.clamp(_margin, size.width - _ballSize - _margin).toDouble(),
+      value.dy.clamp(minY, maxY).toDouble(),
+    );
+  }
+
+  void _snapToEdge(Size size, EdgeInsets safeArea) {
+    final current = _offset ?? _initialOffset(size, safeArea);
+    final snapLeft = current.dx + _ballSize / 2 < size.width / 2;
+    final snapped = _clampOffset(
+      Offset(
+        snapLeft ? _margin : size.width - _ballSize - _margin,
+        current.dy,
+      ),
+      size,
+      safeArea,
+    );
+    setState(() {
+      _offset = snapped;
+      _lastOffset = snapped;
+    });
+  }
+
+  String _labelOf(YuqiaoFeature feature) {
+    return switch (feature) {
+      YuqiaoFeature.stuck => '卡住表达',
+      YuqiaoFeature.camera => '拍照找词',
+      YuqiaoFeature.conversation => '对话补词',
+      YuqiaoFeature.vocabulary => '常用词库',
+    };
+  }
+
+  String _hintOf(YuqiaoFeature feature) {
+    return switch (feature) {
+      YuqiaoFeature.stuck => '说不出来时',
+      YuqiaoFeature.camera => '看见物品时',
+      YuqiaoFeature.conversation => '听对话时',
+      YuqiaoFeature.vocabulary => '找常用词时',
+    };
+  }
+
+  IconData _iconOf(YuqiaoFeature feature) {
+    return switch (feature) {
+      YuqiaoFeature.stuck => Icons.psychology_alt_rounded,
+      YuqiaoFeature.camera => Icons.photo_camera_rounded,
+      YuqiaoFeature.conversation => Icons.graphic_eq_rounded,
+      YuqiaoFeature.vocabulary => Icons.menu_book_rounded,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final safeArea = MediaQuery.paddingOf(context);
+    return Positioned.fill(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final size = constraints.biggest;
+          final currentOffset = _clampOffset(
+              _offset ?? _lastOffset ?? _initialOffset(size, safeArea),
+              size,
+              safeArea);
+          _offset = currentOffset;
+          final isLeftSide = currentOffset.dx < size.width / 2;
+          final menuWidth = math.min(190.0, size.width - _margin * 2);
+          final menuLeft = isLeftSide
+              ? currentOffset.dx + _ballSize + 10
+              : currentOffset.dx - menuWidth - 10;
+          final menuTop = _clampOffset(
+            Offset(
+              currentOffset.dx,
+              currentOffset.dy - 42,
+            ),
+            size,
+            safeArea,
+          ).dy;
+
+          return Stack(
+            children: [
+              if (_expanded)
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onTap: () => setState(() => _expanded = false),
+                  ),
+                ),
+              if (_expanded)
+                Positioned(
+                  left:
+                      menuLeft.clamp(_margin, size.width - menuWidth - _margin),
+                  top: menuTop,
+                  width: menuWidth,
+                  child: _YuqiaoFeatureMenu(
+                    targets: _targets,
+                    labelOf: _labelOf,
+                    hintOf: _hintOf,
+                    iconOf: _iconOf,
+                    onSelected: (feature) {
+                      setState(() => _expanded = false);
+                      widget.launcher.open(context, feature);
+                    },
+                  ),
+                ),
+              AnimatedPositioned(
+                duration: _dragged
+                    ? Duration.zero
+                    : const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                left: currentOffset.dx,
+                top: currentOffset.dy,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    if (_dragged) return;
+                    setState(() => _expanded = !_expanded);
+                  },
+                  onPanStart: (_) {
+                    _dragged = true;
+                    if (_expanded) setState(() => _expanded = false);
+                  },
+                  onPanUpdate: (details) {
+                    setState(() {
+                      _offset = _clampOffset(
+                        currentOffset + details.delta,
+                        size,
+                        safeArea,
+                      );
+                      _lastOffset = _offset;
+                    });
+                  },
+                  onPanEnd: (_) {
+                    _dragged = false;
+                    _snapToEdge(size, safeArea);
+                  },
+                  onPanCancel: () {
+                    _dragged = false;
+                    _snapToEdge(size, safeArea);
+                  },
+                  child: _YuqiaoFeatureBallButton(expanded: _expanded),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _YuqiaoFeatureBallButton extends StatelessWidget {
+  const _YuqiaoFeatureBallButton({required this.expanded});
+
+  final bool expanded;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedScale(
+      scale: expanded ? 1.04 : 1,
+      duration: const Duration(milliseconds: 160),
+      child: Container(
+        width: _YuqiaoFeatureAssistiveBallState._ballSize,
+        height: _YuqiaoFeatureAssistiveBallState._ballSize,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0xFFFFF8D9),
+              Color(0xFFFFC86A),
+              Color(0xFFFF8E6E),
+            ],
+          ),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.86),
+            width: 2,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF7A4C13).withValues(alpha: 0.22),
+              blurRadius: 22,
+              offset: const Offset(0, 9),
+            ),
+          ],
+        ),
+        child: Icon(
+          expanded ? Icons.close_rounded : Icons.auto_awesome_rounded,
+          color: const Color(0xFF503615),
+          size: expanded ? 27 : 29,
+        ),
+      ),
+    );
+  }
+}
+
+class _YuqiaoFeatureMenu extends StatelessWidget {
+  const _YuqiaoFeatureMenu({
+    required this.targets,
+    required this.labelOf,
+    required this.hintOf,
+    required this.iconOf,
+    required this.onSelected,
+  });
+
+  final List<YuqiaoFeature> targets;
+  final String Function(YuqiaoFeature feature) labelOf;
+  final String Function(YuqiaoFeature feature) hintOf;
+  final IconData Function(YuqiaoFeature feature) iconOf;
+  final ValueChanged<YuqiaoFeature> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(22),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.88),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.74),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.12),
+                blurRadius: 24,
+                offset: const Offset(0, 12),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final feature in targets)
+                _YuqiaoFeatureMenuItem(
+                  icon: iconOf(feature),
+                  label: labelOf(feature),
+                  hint: hintOf(feature),
+                  onTap: () => onSelected(feature),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _YuqiaoFeatureMenuItem extends StatelessWidget {
+  const _YuqiaoFeatureMenuItem({
+    required this.icon,
+    required this.label,
+    required this.hint,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final String hint;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF0CE),
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: Icon(icon, color: const Color(0xFF7B4E15), size: 20),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF24211C),
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      hint,
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF8C8172),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.chevron_right_rounded,
+                size: 20,
+                color: Color(0xFF9B8B77),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -826,9 +1391,7 @@ class _ChoicePill extends StatelessWidget {
           height: 52,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: selected
-                ? const Color(0xFF5F8DF7)
-                : const Color(0xFFF4F1EC),
+            color: selected ? const Color(0xFF5F8DF7) : const Color(0xFFF4F1EC),
             borderRadius: BorderRadius.circular(18),
           ),
           child: Text(
@@ -902,9 +1465,7 @@ class _ModeRow extends StatelessWidget {
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: selected
-              ? const Color(0xFFE8EFFD)
-              : const Color(0xFFF7F5F1),
+          color: selected ? const Color(0xFFE8EFFD) : const Color(0xFFF7F5F1),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
             color: selected
@@ -915,12 +1476,9 @@ class _ModeRow extends StatelessWidget {
         child: Row(
           children: [
             Icon(
-              selected
-                  ? Icons.check_circle_rounded
-                  : Icons.circle_outlined,
-              color: selected
-                  ? const Color(0xFF5F8DF7)
-                  : const Color(0xFFAAA59E),
+              selected ? Icons.check_circle_rounded : Icons.circle_outlined,
+              color:
+                  selected ? const Color(0xFF5F8DF7) : const Color(0xFFAAA59E),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -961,6 +1519,9 @@ class VocabularyPage extends StatefulWidget {
     required this.entries,
     required this.onChanged,
     required this.locationController,
+    required this.companionAgent,
+    required this.personalizedLearningEnabled,
+    required this.featureLauncher,
     required this.qwenService,
     required this.personalObjects,
     required this.expressionHabits,
@@ -975,6 +1536,9 @@ class VocabularyPage extends StatefulWidget {
   final List<VocabularyEntry> entries;
   final VocabularyChangedCallback onChanged;
   final LocationRecommendationController locationController;
+  final CompanionAgentController companionAgent;
+  final bool personalizedLearningEnabled;
+  final YuqiaoFeatureLauncher featureLauncher;
   final QwenService qwenService;
   final List<PersonalObject> personalObjects;
   final List<ExpressionHabit> expressionHabits;
@@ -1134,6 +1698,21 @@ class _VocabularyPageState extends State<VocabularyPage> {
       category: 'vocabulary',
       source: 'vocabulary_word',
     );
+    unawaited(widget.companionAgent.recordInteraction(
+      text: text,
+      feature: 'vocabulary',
+      action: CompanionFeedbackAction.spoken,
+      prompt: _searchText,
+      slot: RecommendationSlot.actionOrObject,
+    ));
+    if (mounted) {
+      showYuqiaoLearningReceipt(
+        context,
+        personalizedLearningEnabled: widget.personalizedLearningEnabled,
+        learnedMessage: '已播报，语桥会记住这个常用词',
+        disabledMessage: '已播报，个性化学习已关闭',
+      );
+    }
   }
 
   Future<void> _toggleSearchAsr() async {
@@ -1226,10 +1805,40 @@ class _VocabularyPageState extends State<VocabularyPage> {
       category: 'vocabulary',
       source: 'vocabulary_saved',
     );
+    await widget.companionAgent.recordInteraction(
+      text: cleaned,
+      feature: 'vocabulary',
+      action: CompanionFeedbackAction.saved,
+      prompt: result.category,
+      slot: RecommendationSlot.actionOrObject,
+    );
+    if (mounted) {
+      showYuqiaoLearningReceipt(
+        context,
+        personalizedLearningEnabled: widget.personalizedLearningEnabled,
+        learnedMessage: '已保存，语桥会记住这个常用词',
+        disabledMessage: '已保存，个性化学习已关闭',
+      );
+    }
   }
 
   Future<void> _deleteEntry(VocabularyEntry entry) async {
     await _persist(_entries.where((item) => item.id != entry.id).toList());
+    await widget.companionAgent.recordInteraction(
+      text: entry.text,
+      feature: 'vocabulary',
+      action: CompanionFeedbackAction.deleted,
+      prompt: entry.category,
+      slot: RecommendationSlot.actionOrObject,
+    );
+    if (mounted) {
+      showYuqiaoLearningReceipt(
+        context,
+        personalizedLearningEnabled: widget.personalizedLearningEnabled,
+        learnedMessage: '已删除，语桥会降低这个词的优先级',
+        disabledMessage: '已删除，个性化学习已关闭',
+      );
+    }
   }
 
   Future<void> _addCategory() async {
@@ -1508,407 +2117,420 @@ class _VocabularyPageState extends State<VocabularyPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF7F5F0),
-      body: SafeArea(
-        child: CustomScrollView(
-          physics: const BouncingScrollPhysics(),
-          slivers: [
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // 标题栏
-                    SizedBox(
-                      height: 46,
-                      child: Stack(
-                        children: [
-                          // 返回按钮
-                          Positioned(
-                            left: 0,
-                            top: 0,
-                            child: GestureDetector(
-                              onTap: () => Navigator.of(context).pop(),
-                              child: Container(
-                                width: 46,
-                                height: 46,
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.86),
-                                  shape: BoxShape.circle,
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withOpacity(0.06),
-                                      blurRadius: 14,
-                                      offset: const Offset(0, 7),
+      body: Stack(
+        children: [
+          SafeArea(
+            child: CustomScrollView(
+              physics: const BouncingScrollPhysics(),
+              slivers: [
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // 标题栏
+                        SizedBox(
+                          height: 46,
+                          child: Stack(
+                            children: [
+                              // 返回按钮
+                              Positioned(
+                                left: 0,
+                                top: 0,
+                                child: GestureDetector(
+                                  onTap: () => Navigator.of(context).pop(),
+                                  child: Container(
+                                    width: 46,
+                                    height: 46,
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.86),
+                                      shape: BoxShape.circle,
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withOpacity(0.06),
+                                          blurRadius: 14,
+                                          offset: const Offset(0, 7),
+                                        ),
+                                      ],
                                     ),
-                                  ],
-                                ),
-                                child: Icon(
-                                  Icons.arrow_back_ios_new_rounded,
-                                  color: Colors.black.withOpacity(0.70),
-                                  size: 20,
-                                ),
-                              ),
-                            ),
-                          ),
-                          // 居中标题
-                          const Center(
-                            child: Text(
-                              '常用词库',
-                              style: TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: -0.3,
-                                color: Color(0xFF1F2328),
-                              ),
-                            ),
-                          ),
-                          // 添加按钮
-                          Positioned(
-                            right: 0,
-                            top: 0,
-                            child: GestureDetector(
-                              onTap: _addCategory,
-                              child: Container(
-                                width: 46,
-                                height: 46,
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.86),
-                                  shape: BoxShape.circle,
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withOpacity(0.06),
-                                      blurRadius: 14,
-                                      offset: const Offset(0, 7),
+                                    child: Icon(
+                                      Icons.arrow_back_ios_new_rounded,
+                                      color: Colors.black.withOpacity(0.70),
+                                      size: 20,
                                     ),
-                                  ],
-                                ),
-                                child: const Icon(
-                                  Icons.add_rounded,
-                                  color: Color(0xFF3C3A37),
-                                  size: 24,
+                                  ),
                                 ),
                               ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    // 副标题
-                    Center(
-                      child: Text(
-                        '按场景快速找到想表达的内容',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: const Color(0xFF8E8A84).withOpacity(0.8),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    // 搜索栏
-                    Container(
-                      height: 56,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.82),
-                        borderRadius: BorderRadius.circular(22),
-                        border: Border.all(
-                          color: _searchFocus.hasFocus
-                              ? const Color(0xFF3478F6).withOpacity(0.4)
-                              : Colors.white.withOpacity(0.9),
-                          width: 1,
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.035),
-                            blurRadius: 16,
-                            offset: const Offset(0, 8),
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.search_rounded,
-                            size: 23,
-                            color: Colors.black.withOpacity(0.42),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: TextField(
-                              controller: _searchController,
-                              focusNode: _searchFocus,
-                              style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF2A2D34),
-                              ),
-                              decoration: InputDecoration(
-                                hintText: '搜索词语、句子、场景',
-                                hintStyle: TextStyle(
-                                  color: Colors.black.withOpacity(0.36),
-                                  fontWeight: FontWeight.w600,
+                              // 居中标题
+                              const Center(
+                                child: Text(
+                                  '常用词库',
+                                  style: TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: -0.3,
+                                    color: Color(0xFF1F2328),
+                                  ),
                                 ),
-                                border: InputBorder.none,
-                                isDense: true,
-                                contentPadding: EdgeInsets.zero,
                               ),
-                            ),
-                          ),
-                          if (_searchText.isNotEmpty)
-                            GestureDetector(
-                              onTap: () {
-                                _searchController.clear();
-                                _searchFocus.unfocus();
-                              },
-                              child: Padding(
-                                padding: const EdgeInsets.only(left: 8),
-                                child: Icon(Icons.close_rounded,
-                                    size: 20,
-                                    color: Colors.black.withOpacity(0.35)),
+                              // 添加按钮
+                              Positioned(
+                                right: 0,
+                                top: 0,
+                                child: GestureDetector(
+                                  onTap: _addCategory,
+                                  child: Container(
+                                    width: 46,
+                                    height: 46,
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.86),
+                                      shape: BoxShape.circle,
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withOpacity(0.06),
+                                          blurRadius: 14,
+                                          offset: const Offset(0, 7),
+                                        ),
+                                      ],
+                                    ),
+                                    child: const Icon(
+                                      Icons.add_rounded,
+                                      color: Color(0xFF3C3A37),
+                                      size: 24,
+                                    ),
+                                  ),
+                                ),
                               ),
-                            ),
-                          const SizedBox(width: 8),
-                          GestureDetector(
-                            onTap: _toggleSearchAsr,
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 200),
-                              width: 34,
-                              height: 34,
-                              decoration: BoxDecoration(
-                                color: _isRecording
-                                    ? const Color(0xFFE8615B).withOpacity(0.15)
-                                    : const Color(0xFFF2F0EA),
-                                borderRadius: BorderRadius.circular(14),
-                              ),
-                              child: Icon(
-                                _isRecording
-                                    ? Icons.stop_rounded
-                                    : Icons.mic_rounded,
-                                size: 19,
-                                color: _isRecording
-                                    ? const Color(0xFFE8615B)
-                                    : Colors.black.withOpacity(0.45),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    // 最近常用（搜索时不显示）
-                    if (_searchText.isEmpty) ...[
-                      _buildPersonalObjectDictionary(),
-                      const SizedBox(height: 22),
-                    ],
-                    // 搜索结果或分类标题
-                    if (_searchText.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Text(
-                          '找到 ${_filteredEntries.length + _filteredPersonalObjects.length} 条结果',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            color: const Color(0xFF8E8A84).withOpacity(0.7),
+                            ],
                           ),
                         ),
-                      ),
-                    if (_searchText.isEmpty)
-                      const Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            '词典分类',
+                        const SizedBox(height: 6),
+                        // 副标题
+                        Center(
+                          child: Text(
+                            '按场景快速找到想表达的内容',
                             style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: -0.5,
-                              color: Color(0xFF242629),
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: const Color(0xFF8E8A84).withOpacity(0.8),
                             ),
                           ),
-                          SizedBox(width: 9),
-                          Expanded(
-                            child: Padding(
-                              padding: EdgeInsets.only(bottom: 2),
-                              child: Text(
-                                '先选择场景，再找到常用词和句子',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFFAAA59E),
-                                ),
-                              ),
+                        ),
+                        const SizedBox(height: 18),
+                        // 搜索栏
+                        Container(
+                          height: 56,
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.82),
+                            borderRadius: BorderRadius.circular(22),
+                            border: Border.all(
+                              color: _searchFocus.hasFocus
+                                  ? const Color(0xFF3478F6).withOpacity(0.4)
+                                  : Colors.white.withOpacity(0.9),
+                              width: 1,
                             ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.035),
+                                blurRadius: 16,
+                                offset: const Offset(0, 8),
+                              ),
+                            ],
                           ),
-                        ],
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            // 搜索结果或分类网格
-            if (_searchText.isNotEmpty)
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
-                sliver: SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) {
-                      if (index < _filteredPersonalObjects.length) {
-                        return _buildPersonalObjectSearchResult(
-                          _filteredPersonalObjects[index],
-                        );
-                      }
-                      final entry = _filteredEntries[
-                          index - _filteredPersonalObjects.length];
-                      final meta = _allCategoryMetas
-                          .where((m) => m.name == entry.category)
-                          .firstOrNull;
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: GestureDetector(
-                          onTap: () async {
-                            await _recordWordUsage(entry.text);
-                            await _tts.speak(entry.text);
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.86),
-                              borderRadius: BorderRadius.circular(22),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(0.92),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.search_rounded,
+                                size: 23,
+                                color: Colors.black.withOpacity(0.42),
                               ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.03),
-                                  blurRadius: 12,
-                                  offset: const Offset(0, 6),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: TextField(
+                                  controller: _searchController,
+                                  focusNode: _searchFocus,
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF2A2D34),
+                                  ),
+                                  decoration: InputDecoration(
+                                    hintText: '搜索词语、句子、场景',
+                                    hintStyle: TextStyle(
+                                      color: Colors.black.withOpacity(0.36),
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                  ),
                                 ),
-                              ],
-                            ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 44,
-                                  height: 44,
+                              ),
+                              if (_searchText.isNotEmpty)
+                                GestureDetector(
+                                  onTap: () {
+                                    _searchController.clear();
+                                    _searchFocus.unfocus();
+                                  },
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(left: 8),
+                                    child: Icon(Icons.close_rounded,
+                                        size: 20,
+                                        color: Colors.black.withOpacity(0.35)),
+                                  ),
+                                ),
+                              const SizedBox(width: 8),
+                              GestureDetector(
+                                onTap: _toggleSearchAsr,
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 200),
+                                  width: 34,
+                                  height: 34,
                                   decoration: BoxDecoration(
-                                    color: (meta?.iconColor ??
-                                            const Color(0xFF8E8A84))
-                                        .withOpacity(0.14),
+                                    color: _isRecording
+                                        ? const Color(0xFFE8615B)
+                                            .withOpacity(0.15)
+                                        : const Color(0xFFF2F0EA),
                                     borderRadius: BorderRadius.circular(14),
                                   ),
                                   child: Icon(
-                                    meta?.icon ?? Icons.label_rounded,
-                                    size: 22,
-                                    color: meta?.iconColor ??
-                                        const Color(0xFF8E8A84),
+                                    _isRecording
+                                        ? Icons.stop_rounded
+                                        : Icons.mic_rounded,
+                                    size: 19,
+                                    color: _isRecording
+                                        ? const Color(0xFFE8615B)
+                                        : Colors.black.withOpacity(0.45),
                                   ),
                                 ),
-                                const SizedBox(width: 14),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        entry.text,
-                                        style: const TextStyle(
-                                          fontSize: 18,
-                                          fontWeight: FontWeight.w800,
-                                          color: Color(0xFF2A2D34),
-                                        ),
-                                      ),
-                                      if (entry.note.isNotEmpty) ...[
-                                        const SizedBox(height: 3),
-                                        Text(
-                                          entry.note,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            color:
-                                                Colors.black.withOpacity(0.4),
-                                          ),
-                                        ),
-                                      ],
-                                    ],
-                                  ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        // 最近常用（搜索时不显示）
+                        if (_searchText.isEmpty) ...[
+                          _buildPersonalObjectDictionary(),
+                          const SizedBox(height: 22),
+                        ],
+                        // 搜索结果或分类标题
+                        if (_searchText.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: Text(
+                              '找到 ${_filteredEntries.length + _filteredPersonalObjects.length} 条结果',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: const Color(0xFF8E8A84).withOpacity(0.7),
+                              ),
+                            ),
+                          ),
+                        if (_searchText.isEmpty)
+                          const Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                '词典分类',
+                                style: TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: -0.5,
+                                  color: Color(0xFF242629),
                                 ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: (meta?.iconColor ??
-                                            const Color(0xFF8E8A84))
-                                        .withOpacity(0.10),
-                                    borderRadius: BorderRadius.circular(999),
-                                  ),
+                              ),
+                              SizedBox(width: 9),
+                              Expanded(
+                                child: Padding(
+                                  padding: EdgeInsets.only(bottom: 2),
                                   child: Text(
-                                    entry.category,
+                                    '先选择场景，再找到常用词和句子',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
-                                      fontSize: 11,
+                                      fontSize: 12,
                                       fontWeight: FontWeight.w700,
-                                      color: meta?.iconColor ??
-                                          const Color(0xFF8E8A84),
+                                      color: Color(0xFFAAA59E),
                                     ),
                                   ),
                                 ),
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
-                        ),
-                      );
-                    },
-                    childCount: _filteredEntries.length +
-                        _filteredPersonalObjects.length,
+                      ],
+                    ),
                   ),
                 ),
-              )
-            else
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(20, 14, 20, 28),
-                sliver: SliverGrid(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) {
-                      final meta = _allCategoryMetas[index];
-                      final count = _entriesOf(meta.name).length;
-                      return _VocabularyCategoryCard(
-                        meta: meta,
-                        entryCount: count,
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => _CategoryDetailPage(
-                                meta: meta,
-                                entries: _entriesOf(meta.name),
-                                onAdd: () => _addEntry(meta.name),
-                                onDelete: _deleteEntry,
-                                onWordUsed: _recordWordUsage,
-                                isCustom: _customCategories.contains(meta.name),
-                                onStyleChanged: _saveCustomStyle,
+                // 搜索结果或分类网格
+                if (_searchText.isNotEmpty)
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
+                    sliver: SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, index) {
+                          if (index < _filteredPersonalObjects.length) {
+                            return _buildPersonalObjectSearchResult(
+                              _filteredPersonalObjects[index],
+                            );
+                          }
+                          final entry = _filteredEntries[
+                              index - _filteredPersonalObjects.length];
+                          final meta = _allCategoryMetas
+                              .where((m) => m.name == entry.category)
+                              .firstOrNull;
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: GestureDetector(
+                              onTap: () async {
+                                await _recordWordUsage(entry.text);
+                                await _tts.speak(entry.text);
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.all(16),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.86),
+                                  borderRadius: BorderRadius.circular(22),
+                                  border: Border.all(
+                                    color: Colors.white.withOpacity(0.92),
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withOpacity(0.03),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 6),
+                                    ),
+                                  ],
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 44,
+                                      height: 44,
+                                      decoration: BoxDecoration(
+                                        color: (meta?.iconColor ??
+                                                const Color(0xFF8E8A84))
+                                            .withOpacity(0.14),
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                      child: Icon(
+                                        meta?.icon ?? Icons.label_rounded,
+                                        size: 22,
+                                        color: meta?.iconColor ??
+                                            const Color(0xFF8E8A84),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 14),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            entry.text,
+                                            style: const TextStyle(
+                                              fontSize: 18,
+                                              fontWeight: FontWeight.w800,
+                                              color: Color(0xFF2A2D34),
+                                            ),
+                                          ),
+                                          if (entry.note.isNotEmpty) ...[
+                                            const SizedBox(height: 3),
+                                            Text(
+                                              entry.note,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: Colors.black
+                                                    .withOpacity(0.4),
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: (meta?.iconColor ??
+                                                const Color(0xFF8E8A84))
+                                            .withOpacity(0.10),
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                      ),
+                                      child: Text(
+                                        entry.category,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                          color: meta?.iconColor ??
+                                              const Color(0xFF8E8A84),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           );
                         },
-                      );
-                    },
-                    childCount: _allCategoryMetas.length,
+                        childCount: _filteredEntries.length +
+                            _filteredPersonalObjects.length,
+                      ),
+                    ),
+                  )
+                else
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 14, 20, 28),
+                    sliver: SliverGrid(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, index) {
+                          final meta = _allCategoryMetas[index];
+                          final count = _entriesOf(meta.name).length;
+                          return _VocabularyCategoryCard(
+                            meta: meta,
+                            entryCount: count,
+                            onTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => _CategoryDetailPage(
+                                    meta: meta,
+                                    entries: _entriesOf(meta.name),
+                                    onAdd: () => _addEntry(meta.name),
+                                    onDelete: _deleteEntry,
+                                    onWordUsed: _recordWordUsage,
+                                    isCustom:
+                                        _customCategories.contains(meta.name),
+                                    onStyleChanged: _saveCustomStyle,
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                        childCount: _allCategoryMetas.length,
+                      ),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 2,
+                        mainAxisSpacing: 14,
+                        crossAxisSpacing: 14,
+                        childAspectRatio: 0.93,
+                      ),
+                    ),
                   ),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2,
-                    mainAxisSpacing: 14,
-                    crossAxisSpacing: 14,
-                    childAspectRatio: 0.93,
-                  ),
-                ),
-              ),
-          ],
-        ),
+              ],
+            ),
+          ),
+          YuqiaoFeatureAssistiveBall(
+            currentFeature: YuqiaoFeature.vocabulary,
+            launcher: widget.featureLauncher,
+            bottomClearance: 34,
+          ),
+        ],
       ),
     );
   }
@@ -2180,6 +2802,13 @@ class _VocabularyPageState extends State<VocabularyPage> {
     await widget.personalObjectStore.markUsed(object.id);
     await _recordWordUsage(text);
     await widget.locationController.recordWordUsed(text, 'vocabulary');
+    unawaited(widget.companionAgent.recordInteraction(
+      text: text,
+      feature: 'personalObject',
+      action: CompanionFeedbackAction.spoken,
+      prompt: object.displayName,
+      slot: RecommendationSlot.actionOrObject,
+    ));
     await _tts.stop();
     await _tts.speak(text);
     await _reloadPersonalObjects();
@@ -2201,10 +2830,18 @@ class _VocabularyPageState extends State<VocabularyPage> {
             keywords: [object.displayName, expression],
           ),
           qwenService: widget.qwenService,
+          personalizedLearningEnabled: widget.personalizedLearningEnabled,
           onCandidateSelected: (text) async {
             unawaited(
               widget.locationController.recordWordUsed(text, 'vocabulary'),
             );
+            unawaited(widget.companionAgent.recordInteraction(
+              text: text,
+              feature: 'personalObject',
+              action: CompanionFeedbackAction.accepted,
+              prompt: object.displayName,
+              slot: RecommendationSlot.sentence,
+            ));
             unawaited(
               widget.onHabitRecorded(
                 text,
@@ -2212,6 +2849,15 @@ class _VocabularyPageState extends State<VocabularyPage> {
                 source: 'personal_object_sentence_candidate',
               ),
             );
+          },
+          onCandidateSaved: (text) async {
+            unawaited(widget.companionAgent.recordInteraction(
+              text: text,
+              feature: 'personalObject',
+              action: CompanionFeedbackAction.saved,
+              prompt: object.displayName,
+              slot: RecommendationSlot.sentence,
+            ));
           },
           onExpressionCompleted: widget.onExpressionCompleted,
           onFavoriteSaved: widget.onFavoriteSaved,
@@ -3687,6 +4333,8 @@ class ConversationModePage extends StatefulWidget {
     required this.qwenService,
     required this.locationController,
     required this.companionAgent,
+    required this.personalizedLearningEnabled,
+    required this.featureLauncher,
     required this.recentExpressions,
     required this.favoriteExpressions,
     required this.expressionHabits,
@@ -3699,6 +4347,8 @@ class ConversationModePage extends StatefulWidget {
   final QwenService qwenService;
   final LocationRecommendationController locationController;
   final CompanionAgentController companionAgent;
+  final bool personalizedLearningEnabled;
+  final YuqiaoFeatureLauncher featureLauncher;
   final List<String> recentExpressions;
   final List<String> favoriteExpressions;
   final List<ExpressionHabit> expressionHabits;
@@ -4379,7 +5029,8 @@ class _ConversationModePageState extends State<ConversationModePage>
     } catch (error) {
       token.cancel();
       if (error is! QwenCancelledException) {
-        yuqiaoDebugLog('[Conversation stuck assist] generation skipped: $error');
+        yuqiaoDebugLog(
+            '[Conversation stuck assist] generation skipped: $error');
       }
     }
     if (identical(_stuckAssistToken, token)) _stuckAssistToken = null;
@@ -5036,6 +5687,7 @@ class _ConversationModePageState extends State<ConversationModePage>
         builder: (_) => AiCandidatesPage(
           draft: draft,
           qwenService: widget.qwenService,
+          personalizedLearningEnabled: widget.personalizedLearningEnabled,
           onCandidateSelected: (text) async {
             unawaited(
               widget.locationController.recordWordUsed(text, 'conversation'),
@@ -5051,6 +5703,15 @@ class _ConversationModePageState extends State<ConversationModePage>
               text: text,
               feature: 'conversation',
               action: CompanionFeedbackAction.accepted,
+              prompt: _latestUserFragment,
+              slot: RecommendationContext.inferSlot(_latestUserFragment),
+            ));
+          },
+          onCandidateSaved: (text) async {
+            unawaited(widget.companionAgent.recordInteraction(
+              text: text,
+              feature: 'conversation',
+              action: CompanionFeedbackAction.saved,
               prompt: _latestUserFragment,
               slot: RecommendationContext.inferSlot(_latestUserFragment),
             ));
@@ -5307,8 +5968,8 @@ class _ConversationModePageState extends State<ConversationModePage>
                                               action: CompanionFeedbackAction
                                                   .refreshed,
                                               prompt: _latestUserFragment,
-                                              slot:
-                                                  RecommendationContext.inferSlot(
+                                              slot: RecommendationContext
+                                                  .inferSlot(
                                                 _latestUserFragment,
                                               ),
                                             ));
@@ -5422,8 +6083,7 @@ class _ConversationModePageState extends State<ConversationModePage>
     widget.companionAgent.updateConversationContext(
       transcript: _conversationContextForModel,
       latestUserFragment: _latestUserFragment,
-      userSpeakerLabel:
-          _userSpeakerId == null ? '未确认' : '说话者$_userSpeakerId',
+      userSpeakerLabel: _userSpeakerId == null ? '未确认' : '说话者$_userSpeakerId',
       conversationTerms: _savedConversationTerms,
     );
   }
@@ -5807,10 +6467,24 @@ class _ConversationModePageState extends State<ConversationModePage>
                                 Navigator.of(sheetContext).pop();
                               }
                               if (mounted) {
-                                ScaffoldMessenger.of(this.context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('已记住“${candidate.text}”'),
+                                unawaited(
+                                  widget.companionAgent.recordInteraction(
+                                    text: confirmed.text,
+                                    feature: 'conversation',
+                                    action: CompanionFeedbackAction.saved,
+                                    prompt:
+                                        '确认${conversationTermTypeLabel(confirmed.type)}',
+                                    slot: RecommendationSlot.topic,
                                   ),
+                                );
+                                showYuqiaoLearningReceipt(
+                                  this.context,
+                                  personalizedLearningEnabled:
+                                      widget.personalizedLearningEnabled,
+                                  learnedMessage:
+                                      '已记住“${candidate.text}”，语桥会用于理解后续对话',
+                                  disabledMessage:
+                                      '已记住“${candidate.text}”，个性化学习已关闭',
                                 );
                               }
                             },
@@ -6809,6 +7483,11 @@ class _ConversationModePageState extends State<ConversationModePage>
               ],
             ),
           ),
+          YuqiaoFeatureAssistiveBall(
+            currentFeature: YuqiaoFeature.conversation,
+            launcher: widget.featureLauncher,
+            bottomClearance: _conversationActive ? 96 : 32,
+          ),
         ],
       ),
     );
@@ -7370,9 +8049,11 @@ class StuckFlowPage extends StatefulWidget {
     required this.qwenService,
     required this.locationController,
     required this.companionAgent,
+    required this.personalizedLearningEnabled,
     required this.vocabularyEntries,
     required this.expressionHabits,
     this.preferredCandidateCount = 4,
+    required this.featureLauncher,
     required this.onHabitRecorded,
     required this.onExpressionCompleted,
     required this.onFavoriteSaved,
@@ -7381,9 +8062,11 @@ class StuckFlowPage extends StatefulWidget {
   final QwenService qwenService;
   final LocationRecommendationController locationController;
   final CompanionAgentController companionAgent;
+  final bool personalizedLearningEnabled;
   final List<VocabularyEntry> vocabularyEntries;
   final List<ExpressionHabit> expressionHabits;
   final int preferredCandidateCount;
+  final YuqiaoFeatureLauncher featureLauncher;
   final HabitRecordCallback onHabitRecorded;
   final ExpressionCallback onExpressionCompleted;
   final ExpressionCallback onFavoriteSaved;
@@ -7492,12 +8175,18 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
 
   Future<void> _skipCurrentStep() async {
     final session = _session;
-    if (session?.currentStep?.optional != true) return;
+    final step = session?.currentStep;
+    if (session == null || step?.optional != true) return;
+    _recordVisibleCandidateFeedback(
+      session: session,
+      step: step!,
+      action: CompanionFeedbackAction.skipped,
+    );
     setState(() {
-      session!.skipCurrent();
+      session.skipCurrent();
       _resetStepState();
     });
-    if (session!.currentStep != null) {
+    if (session.currentStep != null) {
       await _recommendCurrentStep();
     }
   }
@@ -7559,6 +8248,7 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
         builder: (_) => AiCandidatesPage(
           draft: draft,
           qwenService: widget.qwenService,
+          personalizedLearningEnabled: widget.personalizedLearningEnabled,
           onExitFlow: _exitCompletedFlow,
           onCandidateSelected: (text) async {
             unawaited(widget.locationController.recordWordUsed(text, 'stuck'));
@@ -7573,6 +8263,15 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
               text: text,
               feature: 'stuck',
               action: CompanionFeedbackAction.accepted,
+              prompt: session.intent.sentenceIntent,
+              slot: RecommendationSlot.sentence,
+            ));
+          },
+          onCandidateSaved: (text) async {
+            unawaited(widget.companionAgent.recordInteraction(
+              text: text,
+              feature: 'stuck',
+              action: CompanionFeedbackAction.saved,
               prompt: session.intent.sentenceIntent,
               slot: RecommendationSlot.sentence,
             ));
@@ -8022,6 +8721,11 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
     if (session == null || step == null || _isRecommending || _isRefreshing) {
       return;
     }
+    _recordVisibleCandidateFeedback(
+      session: session,
+      step: step,
+      action: CompanionFeedbackAction.refreshed,
+    );
     _seenCandidates.addAll(
       _visibleCandidates.map(
         (candidate) =>
@@ -8034,6 +8738,26 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
       forceRefresh: true,
       diversificationLevel: _refreshAttempts,
     );
+  }
+
+  void _recordVisibleCandidateFeedback({
+    required StuckExpressionSession session,
+    required StuckStepDefinition step,
+    required CompanionFeedbackAction action,
+  }) {
+    final texts = _visibleCandidates
+        .map((candidate) => candidate.text.trim())
+        .where((text) => text.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    if (texts.isEmpty) return;
+    unawaited(widget.companionAgent.recordRejectedBatch(
+      texts: texts,
+      feature: 'stuck',
+      action: action,
+      prompt: step.title.isEmpty ? session.intent.sentenceIntent : step.title,
+      slot: _locationSlotFor(step.slot),
+    ));
   }
 
   Future<void> _showClarificationSheet() async {
@@ -8315,83 +9039,92 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
     final pickingIntent = session == null;
     return Scaffold(
       backgroundColor: AppColors.background,
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(AppSpacing.page),
-          children: [
-            PageHeader(
-              title: pickingIntent ? '你想表达什么？' : step?.title ?? '表达已经足够清楚',
-              subtitle: pickingIntent
-                  ? '先选择最接近的任务，也可以输入记得的几个字'
-                  : step?.subtitle ?? '可以整理成完整句子，也可以返回修改',
-              onBack: _goBackWithinFlow,
-            ),
-            const SizedBox(height: 18),
-            if (session != null) ...[
-              _buildExpressionTrail(session),
-              const SizedBox(height: AppSpacing.section),
-            ],
-            if (pickingIntent)
-              _buildIntentPicker()
-            else ...[
-              if (step != null)
-                _isRecommending
-                    ? _CandidateLoadingGrid(
-                        count: widget.preferredCandidateCount,
-                      )
-                    : _StuckCandidateGrid(
-                        candidates: _visibleCandidates,
-                        onSelected: _chooseCandidate,
-                      ),
-              if (step != null && !_isRecommending) ...[
-                const SizedBox(height: 14),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    TextButton.icon(
-                      onPressed: _isRefreshing ? null : _refreshOptions,
-                      icon: const Icon(Icons.refresh_rounded),
-                      label: Text(_isRefreshing ? '正在换一组' : '换一组'),
-                    ),
-                    if (step.optional) ...[
-                      const SizedBox(width: 8),
-                      TextButton(
-                        onPressed: _skipCurrentStep,
-                        child: const Text('跳过这一步'),
-                      ),
-                    ],
-                  ],
+      body: Stack(
+        children: [
+          SafeArea(
+            child: ListView(
+              padding: const EdgeInsets.all(AppSpacing.page),
+              children: [
+                PageHeader(
+                  title: pickingIntent ? '你想表达什么？' : step?.title ?? '表达已经足够清楚',
+                  subtitle: pickingIntent
+                      ? '先选择最接近的任务，也可以输入记得的几个字'
+                      : step?.subtitle ?? '可以整理成完整句子，也可以返回修改',
+                  onBack: _goBackWithinFlow,
                 ),
-              ],
-              if (session.canFinish) ...[
                 const SizedBox(height: 18),
-                SizedBox(
-                  height: 54,
-                  child: FilledButton.icon(
-                    onPressed: _finishExpression,
-                    icon: const Icon(Icons.auto_awesome_rounded),
-                    label: Text(step == null ? '整理成完整句子' : '现在整理成句'),
-                    style: FilledButton.styleFrom(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
+                if (session != null) ...[
+                  _buildExpressionTrail(session),
+                  const SizedBox(height: AppSpacing.section),
+                ],
+                if (pickingIntent)
+                  _buildIntentPicker()
+                else ...[
+                  if (step != null)
+                    _isRecommending
+                        ? _CandidateLoadingGrid(
+                            count: widget.preferredCandidateCount,
+                          )
+                        : _StuckCandidateGrid(
+                            candidates: _visibleCandidates,
+                            onSelected: _chooseCandidate,
+                          ),
+                  if (step != null && !_isRecommending) ...[
+                    const SizedBox(height: 14),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        TextButton.icon(
+                          onPressed: _isRefreshing ? null : _refreshOptions,
+                          icon: const Icon(Icons.refresh_rounded),
+                          label: Text(_isRefreshing ? '正在换一组' : '换一组'),
+                        ),
+                        if (step.optional) ...[
+                          const SizedBox(width: 8),
+                          TextButton(
+                            onPressed: _skipCurrentStep,
+                            child: const Text('跳过这一步'),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                  if (session.canFinish) ...[
+                    const SizedBox(height: 18),
+                    SizedBox(
+                      height: 54,
+                      child: FilledButton.icon(
+                        onPressed: _finishExpression,
+                        icon: const Icon(Icons.auto_awesome_rounded),
+                        label: Text(step == null ? '整理成完整句子' : '现在整理成句'),
+                        style: FilledButton.styleFrom(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                if (step != null)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 8),
-                    child: Center(
-                      child: Text(
-                        '也可以继续选择，让表达更准确',
-                        style: TextStyle(color: AppColors.textSecondary),
+                    if (step != null)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Center(
+                          child: Text(
+                            '也可以继续选择，让表达更准确',
+                            style: TextStyle(color: AppColors.textSecondary),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
+                  ],
+                ],
               ],
-            ],
-          ],
-        ),
+            ),
+          ),
+          YuqiaoFeatureAssistiveBall(
+            currentFeature: YuqiaoFeature.stuck,
+            launcher: widget.featureLauncher,
+            bottomClearance: 28,
+          ),
+        ],
       ),
     );
   }
@@ -8915,8 +9648,10 @@ class AiCandidatesPage extends StatefulWidget {
     super.key,
     required this.draft,
     required this.qwenService,
+    required this.personalizedLearningEnabled,
     this.onExitFlow,
     this.onCandidateSelected,
+    this.onCandidateSaved,
     this.onCandidatesRejected,
     required this.onExpressionCompleted,
     required this.onFavoriteSaved,
@@ -8924,8 +9659,10 @@ class AiCandidatesPage extends StatefulWidget {
 
   final ExpressionDraft draft;
   final QwenService qwenService;
+  final bool personalizedLearningEnabled;
   final VoidCallback? onExitFlow;
   final ExpressionCallback? onCandidateSelected;
+  final ExpressionCallback? onCandidateSaved;
   final Future<void> Function(List<String> sentences)? onCandidatesRejected;
   final ExpressionCallback onExpressionCompleted;
   final ExpressionCallback onFavoriteSaved;
@@ -9213,16 +9950,19 @@ class _AiCandidatesPageState extends State<AiCandidatesPage> {
             index: i,
             onTap: () {
               final onCandidateSelected = widget.onCandidateSelected;
-              if (onCandidateSelected != null) {
-                unawaited(onCandidateSelected(sentences[i]));
-              }
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) => ConfirmSpeakPage(
                     sentence: sentences[i],
+                    personalizedLearningEnabled:
+                        widget.personalizedLearningEnabled,
                     onExitFlow: widget.onExitFlow,
-                    onExpressionCompleted: widget.onExpressionCompleted,
+                    onExpressionCompleted: (sentence) async {
+                      await widget.onExpressionCompleted(sentence);
+                      await onCandidateSelected?.call(sentence);
+                    },
                     onFavoriteSaved: widget.onFavoriteSaved,
+                    onCandidateSaved: widget.onCandidateSaved,
                   ),
                 ),
               );
@@ -9371,10 +10111,13 @@ class CameraWordPage extends StatefulWidget {
     super.key,
     required this.qwenService,
     required this.locationController,
+    required this.companionAgent,
+    required this.personalizedLearningEnabled,
     required this.vocabularyEntries,
     required this.personalObjects,
     required this.expressionHabits,
     required this.personalObjectStore,
+    required this.featureLauncher,
     required this.onPersonalObjectsChanged,
     required this.onHabitRecorded,
     required this.onVocabularyChanged,
@@ -9384,10 +10127,13 @@ class CameraWordPage extends StatefulWidget {
 
   final QwenService qwenService;
   final LocationRecommendationController locationController;
+  final CompanionAgentController companionAgent;
+  final bool personalizedLearningEnabled;
   final List<VocabularyEntry> vocabularyEntries;
   final List<PersonalObject> personalObjects;
   final List<ExpressionHabit> expressionHabits;
   final PersonalObjectStore personalObjectStore;
+  final YuqiaoFeatureLauncher featureLauncher;
   final Future<void> Function() onPersonalObjectsChanged;
   final HabitRecordCallback onHabitRecorded;
   final VocabularyChangedCallback onVocabularyChanged;
@@ -9407,6 +10153,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
   final LocalObjectLocator _localObjectLocator = LocalObjectLocator();
   Future<ObjectRecognition>? _recognition;
   Uint8List? _imageBytes;
+  Uint8List? _frozenPreviewBytes;
   Size? _capturedImageSize;
   ObjectCandidate? _selectedCandidate;
   late List<VocabularyEntry> _localVocabularyEntries;
@@ -9521,36 +10268,42 @@ class _CameraWordPageState extends State<CameraWordPage> {
       return recognition;
     }
     final merged = <ObjectCandidate>[];
+    final usedLocalBoxIndexes = <int>{};
     for (var index = 0; index < recognition.candidates.length; index++) {
       final candidate = recognition.candidates[index];
-      final localBox = _bestLocalBoxForCandidate(
+      final localBoxIndex = _bestLocalBoxIndexForCandidate(
         candidate,
         recognition.candidates.length,
         localBoxes,
+        usedLocalBoxIndexes,
       );
-      if (localBox == null) {
+      if (localBoxIndex == null) {
         merged.add(candidate);
       } else {
+        usedLocalBoxIndexes.add(localBoxIndex);
+        final localBox = localBoxes[localBoxIndex];
         merged.add(candidate.copyWith(bbox: localBox.bbox));
       }
     }
     return ObjectRecognition(candidates: merged);
   }
 
-  LocalObjectBox? _bestLocalBoxForCandidate(
+  int? _bestLocalBoxIndexForCandidate(
     ObjectCandidate candidate,
     int candidateCount,
     List<LocalObjectBox> localBoxes,
+    Set<int> usedLocalBoxIndexes,
   ) {
     final qwenBox = candidate.bbox;
     if (qwenBox == null || qwenBox.length != 4) {
-      if (candidateCount == 1) return localBoxes.first;
+      if (candidateCount == 1 && !usedLocalBoxIndexes.contains(0)) return 0;
       return null;
     }
 
     var bestIndex = -1;
     var bestScore = 0.0;
     for (var index = 0; index < localBoxes.length; index++) {
+      if (usedLocalBoxIndexes.contains(index)) continue;
       final box = localBoxes[index];
       final overlap = _boxIou(qwenBox, box.bbox);
       final centerScore = _boxCenterScore(qwenBox, box.bbox);
@@ -9565,7 +10318,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
       }
     }
     if (bestIndex < 0 || bestScore < 0.20) return null;
-    return localBoxes[bestIndex];
+    return bestIndex;
   }
 
   double _boxIou(List<double> a, List<double> b) {
@@ -9603,6 +10356,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
     _imageRequestId++;
     setState(() {
       _imageBytes = null;
+      _frozenPreviewBytes = null;
       _capturedImageSize = null;
       _capturedImageMirrored = false;
       _recognition = null;
@@ -9612,6 +10366,13 @@ class _CameraWordPageState extends State<CameraWordPage> {
   }
 
   Future<void> _speakObject(ObjectCandidate candidate) async {
+    unawaited(widget.companionAgent.recordInteraction(
+      text: candidate.objectName,
+      feature: 'camera',
+      action: CompanionFeedbackAction.spoken,
+      prompt: candidate.visualDescription,
+      slot: RecommendationSlot.actionOrObject,
+    ));
     await _speakText(candidate.objectName);
     if (candidate.personalObjectId.isNotEmpty) {
       unawaited(
@@ -9633,6 +10394,14 @@ class _CameraWordPageState extends State<CameraWordPage> {
     try {
       await _tts.stop();
       await _tts.speak(text);
+      if (mounted) {
+        showYuqiaoLearningReceipt(
+          context,
+          personalizedLearningEnabled: widget.personalizedLearningEnabled,
+          learnedMessage: '已播报，语桥会记住这个物品选择',
+          disabledMessage: '已播报，个性化学习已关闭',
+        );
+      }
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -9770,6 +10539,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
     if (_imageBytes != null) {
       setState(() {
         _imageBytes = null;
+        _frozenPreviewBytes = null;
         _capturedImageSize = null;
         _capturedImageMirrored = false;
         _recognition = null;
@@ -9781,6 +10551,10 @@ class _CameraWordPageState extends State<CameraWordPage> {
 
     try {
       if (state is PhotoCameraState) {
+        await _freezeCurrentPreviewFrame();
+        if (!mounted) {
+          return;
+        }
         setState(() {
           _isTakingPhoto = true;
           _captureWasFrontCamera = _isFrontCamera;
@@ -9792,6 +10566,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
             }
             setState(() {
               _isTakingPhoto = false;
+              _frozenPreviewBytes = null;
             });
           },
         );
@@ -9802,7 +10577,30 @@ class _CameraWordPageState extends State<CameraWordPage> {
       }
       setState(() {
         _isTakingPhoto = false;
+        _frozenPreviewBytes = null;
       });
+    }
+  }
+
+  Future<void> _freezeCurrentPreviewFrame() async {
+    if (_imageBytes != null || _frozenPreviewBytes != null) return;
+    try {
+      final previewContext = previewWidgetKey.currentContext;
+      final renderObject = previewContext?.findRenderObject();
+      if (renderObject is! RenderRepaintBoundary) return;
+      if (renderObject.debugNeedsPaint) {
+        await WidgetsBinding.instance.endOfFrame;
+      }
+      if (!mounted || _imageBytes != null) return;
+      final image = await renderObject.toImage(pixelRatio: 1.0);
+      final byteData = await image.toByteData(format: ImageByteFormat.png);
+      image.dispose();
+      if (!mounted || byteData == null || _imageBytes != null) return;
+      setState(() {
+        _frozenPreviewBytes = byteData.buffer.asUint8List();
+      });
+    } catch (error) {
+      yuqiaoDebugLog('[Camera freeze] preview snapshot skipped: $error');
     }
   }
 
@@ -9822,6 +10620,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
       if (mounted) {
         setState(() {
           _isTakingPhoto = false;
+          _frozenPreviewBytes = null;
         });
       }
       return;
@@ -9835,6 +10634,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
       if (mounted) {
         setState(() {
           _isTakingPhoto = false;
+          _frozenPreviewBytes = null;
         });
       }
       return;
@@ -9854,6 +10654,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
       if (!mounted) return;
       setState(() {
         _isTakingPhoto = false;
+        _frozenPreviewBytes = null;
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('照片处理失败：$error')),
@@ -9871,6 +10672,9 @@ class _CameraWordPageState extends State<CameraWordPage> {
       return;
     }
     final bytes = await picked.readAsBytes();
+    if (mounted) {
+      setState(() => _frozenPreviewBytes = null);
+    }
     await _startRecognition(bytes);
   }
 
@@ -9880,6 +10684,9 @@ class _CameraWordPageState extends State<CameraWordPage> {
       final String? path = await _galleryChannel.invokeMethod('openGallery');
       if (path == null || path.isEmpty) return; // 用户取消
       final bytes = await File(path).readAsBytes();
+      if (mounted) {
+        setState(() => _frozenPreviewBytes = null);
+      }
       await _startRecognition(bytes);
     } catch (e) {
       // 平台通道失败时回退到 image_picker
@@ -9902,6 +10709,7 @@ class _CameraWordPageState extends State<CameraWordPage> {
     if (!mounted || requestId != _imageRequestId) return;
     setState(() {
       _imageBytes = normalizedBytes;
+      _frozenPreviewBytes = null;
       _capturedImageSize = null;
       _capturedImageMirrored = mirrored;
       _selectedCandidate = null;
@@ -9933,6 +10741,13 @@ class _CameraWordPageState extends State<CameraWordPage> {
     String expression, {
     String? expressionType,
   }) {
+    unawaited(widget.companionAgent.recordInteraction(
+      text: expression,
+      feature: 'camera',
+      action: CompanionFeedbackAction.accepted,
+      prompt: candidate.objectName,
+      slot: RecommendationSlot.sentence,
+    ));
     widget.locationController.recordWordUsed(candidate.objectName, 'camera');
     widget.locationController.recordWordUsed(expression, 'camera');
     unawaited(
@@ -9963,8 +10778,16 @@ class _CameraWordPageState extends State<CameraWordPage> {
         builder: (_) => AiCandidatesPage(
           draft: draft,
           qwenService: widget.qwenService,
+          personalizedLearningEnabled: widget.personalizedLearningEnabled,
           onCandidateSelected: (text) async {
             unawaited(widget.locationController.recordWordUsed(text, 'camera'));
+            unawaited(widget.companionAgent.recordInteraction(
+              text: text,
+              feature: 'camera',
+              action: CompanionFeedbackAction.accepted,
+              prompt: candidate.objectName,
+              slot: RecommendationSlot.sentence,
+            ));
             unawaited(
               widget.onHabitRecorded(
                 text,
@@ -9972,6 +10795,15 @@ class _CameraWordPageState extends State<CameraWordPage> {
                 source: 'camera_sentence_candidate',
               ),
             );
+          },
+          onCandidateSaved: (text) async {
+            unawaited(widget.companionAgent.recordInteraction(
+              text: text,
+              feature: 'camera',
+              action: CompanionFeedbackAction.saved,
+              prompt: candidate.objectName,
+              slot: RecommendationSlot.sentence,
+            ));
           },
           onExpressionCompleted: widget.onExpressionCompleted,
           onFavoriteSaved: widget.onFavoriteSaved,
@@ -10035,6 +10867,13 @@ class _CameraWordPageState extends State<CameraWordPage> {
       category: 'vocabulary',
       source: 'personal_object_saved',
     );
+    unawaited(widget.companionAgent.recordInteraction(
+      text: clean,
+      feature: 'camera',
+      action: CompanionFeedbackAction.saved,
+      prompt: candidate.objectName,
+      slot: RecommendationSlot.actionOrObject,
+    ));
     _personalObjects = await widget.personalObjectStore.loadAll();
     await widget.onPersonalObjectsChanged();
     if (!mounted) return true;
@@ -10054,193 +10893,217 @@ class _CameraWordPageState extends State<CameraWordPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Listener(
-        behavior: HitTestBehavior.translucent,
-        onPointerDown: _onPreviewPointerDown,
-        onPointerMove: _onPreviewPointerMove,
-        onPointerUp: _onPreviewPointerUp,
-        onPointerCancel: _onPreviewPointerUp,
-        child: CameraAwesomeBuilder.custom(
-          saveConfig: SaveConfig.photo(),
-          sensorConfig: SensorConfig.single(
-            sensor: Sensor.position(SensorPosition.back),
-            // 16:9 更接近竖屏取景比例，减少 4:3 预览在全屏 cover 下
-            // 被裁掉的大量左右区域。
-            aspectRatio: CameraAspectRatios.ratio_16_9,
-          ),
-          // 预览与拍后结果都显示完整画面，避免用户取景时看不到的
-          // JPEG 边缘在识别后突然出现。
-          previewFit: CameraPreviewFit.contain,
-          progressIndicator: const _CameraBootView(),
-          onMediaCaptureEvent: _handleMediaCapture,
-          onPreviewScaleBuilder: (cameraState) => OnPreviewScale(
-            onScaleStart: () {
-              // 记录手势开始时的 normalized zoom
-              _pinchBaseZoom = _zoomValue.value;
-            },
-            onScale: (scale) {
-              if (_sensorConfig == null || !_zoomInitialized) return;
-              // scale 是相对于手势开始时的比例（1.0 = 无变化）
-              // 将 normalized zoom 转换为实际缩放比，应用手势缩放，再转回
-              final baseRatio = _minZoomRatio +
-                  _pinchBaseZoom * (_maxZoomRatio - _minZoomRatio);
-              final newRatio =
-                  (baseRatio * scale).clamp(_minZoomRatio, _maxZoomRatio);
-              final newZoom =
-                  ((newRatio - _minZoomRatio) / (_maxZoomRatio - _minZoomRatio))
+      body: Stack(
+        children: [
+          Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: _onPreviewPointerDown,
+            onPointerMove: _onPreviewPointerMove,
+            onPointerUp: _onPreviewPointerUp,
+            onPointerCancel: _onPreviewPointerUp,
+            child: CameraAwesomeBuilder.custom(
+              saveConfig: SaveConfig.photo(),
+              sensorConfig: SensorConfig.single(
+                sensor: Sensor.position(SensorPosition.back),
+                // 16:9 更接近竖屏取景比例，减少 4:3 预览在全屏 cover 下
+                // 被裁掉的大量左右区域。
+                aspectRatio: CameraAspectRatios.ratio_16_9,
+              ),
+              // 预览与拍后结果都显示完整画面，避免用户取景时看不到的
+              // JPEG 边缘在识别后突然出现。
+              previewFit: CameraPreviewFit.contain,
+              progressIndicator: const _CameraBootView(),
+              onMediaCaptureEvent: _handleMediaCapture,
+              onPreviewScaleBuilder: (cameraState) => OnPreviewScale(
+                onScaleStart: () {
+                  // 记录手势开始时的 normalized zoom
+                  _pinchBaseZoom = _zoomValue.value;
+                },
+                onScale: (scale) {
+                  if (_sensorConfig == null || !_zoomInitialized) return;
+                  // scale 是相对于手势开始时的比例（1.0 = 无变化）
+                  // 将 normalized zoom 转换为实际缩放比，应用手势缩放，再转回
+                  final baseRatio = _minZoomRatio +
+                      _pinchBaseZoom * (_maxZoomRatio - _minZoomRatio);
+                  final newRatio =
+                      (baseRatio * scale).clamp(_minZoomRatio, _maxZoomRatio);
+                  final newZoom = ((newRatio - _minZoomRatio) /
+                          (_maxZoomRatio - _minZoomRatio))
                       .clamp(0.0, 1.0);
-              _requestZoom(newZoom.toDouble());
-            },
-          ),
-          builder: (cameraState, preview) {
-            // Hold a reference to the sensor config for our pinch handler
-            final newSensorConfig = cameraState.sensorConfig;
-            if (_sensorConfig != newSensorConfig) {
-              _sensorConfig = newSensorConfig;
-              _zoomInitialized = false; // 传感器变化时重新初始化
-            }
+                  _requestZoom(newZoom.toDouble());
+                },
+              ),
+              builder: (cameraState, preview) {
+                // Hold a reference to the sensor config for our pinch handler
+                final newSensorConfig = cameraState.sensorConfig;
+                if (_sensorConfig != newSensorConfig) {
+                  _sensorConfig = newSensorConfig;
+                  _zoomInitialized = false; // 传感器变化时重新初始化
+                }
 
-            // Initialize zoom to 1.0x after the camera pipeline is ready
-            if (!_zoomInitialized) {
-              _initZoomToOneX();
-            }
+                // Initialize zoom to 1.0x after the camera pipeline is ready
+                if (!_zoomInitialized) {
+                  _initZoomToOneX();
+                }
 
-            return Stack(
-              children: [
-                // 亮度手势层：仅包裹相机预览区域
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: Stack(
-                      children: [
-                        if (_imageBytes != null)
-                          Positioned.fill(
-                            child: Transform.flip(
-                              flipX: _capturedImageMirrored,
-                              child: Image.memory(
-                                _imageBytes!,
-                                // 识别结果必须展示完整 JPEG；否则 cover 裁掉的区域
-                                // 仍会拥有模型框，看起来就像框跑到了屏幕外。
-                                fit: BoxFit.contain,
-                                gaplessPlayback: true,
-                                filterQuality: FilterQuality.medium,
-                              ),
-                            ),
-                          ),
-                        const Positioned.fill(child: _CameraOverlayGradient()),
-                        // 亮度视觉遮罩（曝光补偿效果不明显时的辅助反馈）
-                        if (_brightness < 0.49)
-                          Positioned.fill(
-                            child: IgnorePointer(
-                              child: Container(
-                                color: Colors.black.withValues(
-                                  alpha: (0.5 - _brightness) * 1.4,
+                return Stack(
+                  children: [
+                    // 亮度手势层：仅包裹相机预览区域
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: Stack(
+                          children: [
+                            if (_imageBytes != null)
+                              Positioned.fill(
+                                child: Transform.flip(
+                                  flipX: _capturedImageMirrored,
+                                  child: Image.memory(
+                                    _imageBytes!,
+                                    // 识别结果必须展示完整 JPEG；否则 cover 裁掉的区域
+                                    // 仍会拥有模型框，看起来就像框跑到了屏幕外。
+                                    fit: BoxFit.contain,
+                                    gaplessPlayback: true,
+                                    filterQuality: FilterQuality.medium,
+                                  ),
+                                ),
+                              )
+                            else if (_isTakingPhoto &&
+                                _frozenPreviewBytes != null)
+                              Positioned.fill(
+                                child: Image.memory(
+                                  _frozenPreviewBytes!,
+                                  fit: BoxFit.cover,
+                                  gaplessPlayback: true,
+                                  filterQuality: FilterQuality.low,
                                 ),
                               ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                if (_recognition != null)
-                  Positioned.fill(
-                    child: _buildRecognitionOverlay(),
-                  ),
-                // UI 层：在手势层之上，按钮和控件优先接收触摸
-                SafeArea(
-                  child: Stack(
-                    children: [
-                      // 返回按钮（左上）
-                      // 闪光灯按钮（顶部中间）
-                      if (_imageBytes == null)
-                        Positioned(
-                          top: 18,
-                          left: 0,
-                          right: 0,
-                          child: Center(
-                            child: _buildFlashButton(),
-                          ),
-                        ),
-                      // 亮度调节指示器（右侧，滑动时显示）
-                      if (_isAdjustingBrightness)
-                        Positioned(
-                          right: 24,
-                          top: 0,
-                          bottom: 200,
-                          child: Center(
-                            child: _buildBrightnessIndicator(),
-                          ),
-                        ),
-                      // 对焦框已移除，避免拦截双指缩放手势
-                      if (_imageBytes == null)
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          child: ValueListenableBuilder<double>(
-                            valueListenable: _zoomValue,
-                            builder: (context, zoomValue, _) =>
-                                _CameraBottomControl(
-                              imageBytes: _imageBytes,
-                              currentZoom: zoomValue,
-                              minZoomRatio: _minZoomRatio,
-                              maxZoomRatio: _maxZoomRatio,
-                              onZoomChanged: (newNormalizedZoom) {
-                                _requestZoom(newNormalizedZoom);
-                              },
-                              onGallery: () => _openDefaultGallery(),
-                              onShutter: () =>
-                                  _captureWithCamerawesome(cameraState),
-                              onFlip: () async {
-                                _pendingZoom = null;
-                                _zoomValue.value = 0;
-                                setState(() {
-                                  _imageBytes = null;
-                                  _capturedImageSize = null;
-                                  _capturedImageMirrored = false;
-                                  _recognition = null;
-                                  _selectedCandidate = null;
-                                  _isFrontCamera = !_isFrontCamera;
-                                  _resultPanelHeight = 160;
-                                  _zoomInitialized = false;
-                                });
-                                await cameraState.switchCameraSensor(
-                                  aspectRatio:
-                                      cameraState.sensorConfig.aspectRatio,
-                                );
-                              },
-                              isLoading: _isTakingPhoto,
-                            ),
-                          ),
-                        ),
-                      // Keep navigation above recognition and result overlays.
-                      Positioned(
-                        top: 18,
-                        left: 24,
-                        child: SizedBox(
-                          width: 60,
-                          child: _GlassToolbar(
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: () => Navigator.of(context).maybePop(),
-                              child: Center(
-                                child: Icon(
-                                  Icons.arrow_back_ios_new,
-                                  color: Colors.white.withValues(alpha: 0.92),
-                                  size: 20,
+                            const Positioned.fill(
+                                child: _CameraOverlayGradient()),
+                            // 亮度视觉遮罩（曝光补偿效果不明显时的辅助反馈）
+                            if (_brightness < 0.49)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: Container(
+                                    color: Colors.black.withValues(
+                                      alpha: (0.5 - _brightness) * 1.4,
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
-                          ),
+                          ],
                         ),
                       ),
-                    ],
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
+                    ),
+                    if (_recognition != null)
+                      Positioned.fill(
+                        child: _buildRecognitionOverlay(),
+                      ),
+                    // UI 层：在手势层之上，按钮和控件优先接收触摸
+                    SafeArea(
+                      child: Stack(
+                        children: [
+                          // 返回按钮（左上）
+                          // 闪光灯按钮（顶部中间）
+                          if (_imageBytes == null)
+                            Positioned(
+                              top: 18,
+                              left: 0,
+                              right: 0,
+                              child: Center(
+                                child: _buildFlashButton(),
+                              ),
+                            ),
+                          // 亮度调节指示器（右侧，滑动时显示）
+                          if (_isAdjustingBrightness)
+                            Positioned(
+                              right: 24,
+                              top: 0,
+                              bottom: 200,
+                              child: Center(
+                                child: _buildBrightnessIndicator(),
+                              ),
+                            ),
+                          // 对焦框已移除，避免拦截双指缩放手势
+                          if (_imageBytes == null)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: ValueListenableBuilder<double>(
+                                valueListenable: _zoomValue,
+                                builder: (context, zoomValue, _) =>
+                                    _CameraBottomControl(
+                                  imageBytes: _imageBytes,
+                                  currentZoom: zoomValue,
+                                  minZoomRatio: _minZoomRatio,
+                                  maxZoomRatio: _maxZoomRatio,
+                                  onZoomChanged: (newNormalizedZoom) {
+                                    _requestZoom(newNormalizedZoom);
+                                  },
+                                  onGallery: () => _openDefaultGallery(),
+                                  onShutter: () =>
+                                      _captureWithCamerawesome(cameraState),
+                                  onFlip: () async {
+                                    _pendingZoom = null;
+                                    _zoomValue.value = 0;
+                                    setState(() {
+                                      _imageBytes = null;
+                                      _frozenPreviewBytes = null;
+                                      _capturedImageSize = null;
+                                      _capturedImageMirrored = false;
+                                      _recognition = null;
+                                      _selectedCandidate = null;
+                                      _isFrontCamera = !_isFrontCamera;
+                                      _resultPanelHeight = 160;
+                                      _zoomInitialized = false;
+                                    });
+                                    await cameraState.switchCameraSensor(
+                                      aspectRatio:
+                                          cameraState.sensorConfig.aspectRatio,
+                                    );
+                                  },
+                                  isLoading: _isTakingPhoto,
+                                ),
+                              ),
+                            ),
+                          // Keep navigation above recognition and result overlays.
+                          Positioned(
+                            top: 18,
+                            left: 24,
+                            child: SizedBox(
+                              width: 60,
+                              child: _GlassToolbar(
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => Navigator.of(context).maybePop(),
+                                  child: Center(
+                                    child: Icon(
+                                      Icons.arrow_back_ios_new,
+                                      color:
+                                          Colors.white.withValues(alpha: 0.92),
+                                      size: 20,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+          YuqiaoFeatureAssistiveBall(
+            currentFeature: YuqiaoFeature.camera,
+            launcher: widget.featureLauncher,
+            bottomClearance: _imageBytes == null
+                ? _cameraControlsClearance + 18
+                : _resultPanelHeight + 42,
+          ),
+        ],
       ),
     );
   }
@@ -10922,7 +11785,14 @@ class _InteractiveBoundingBoxes extends StatelessWidget {
     final markers = <_ObjectMarkerLayout>[];
     for (int index = 0; index < candidates.length; index++) {
       final candidate = candidates[index];
-      final rect = _displayRect(canvasSize, candidate, index);
+      var rect = _displayRect(canvasSize, candidate, index);
+      final duplicatesExistingBox = markers.any((previous) {
+        return _rectIou(previous.rect, rect) > 0.82 &&
+            (previous.rect.center - rect.center).distance < 16;
+      });
+      if (duplicatesExistingBox) {
+        rect = _fallbackDisplayRect(canvasSize, index);
+      }
       var overlapLevel = 0;
       for (final previous in markers) {
         if (_rectIou(previous.rect, rect) > 0.46 ||
@@ -11165,12 +12035,7 @@ class _InteractiveBoundingBoxes extends StatelessWidget {
   ) {
     final bbox = candidate.bbox;
     if (bbox == null || bbox.length != 4 || imageSize == null) {
-      final width = math.min(180.0, canvasSize.width * 0.45);
-      final height = math.min(120.0, canvasSize.height * 0.18);
-      final left = (canvasSize.width - width) / 2 + (index % 2) * 18 - 9;
-      final top = canvasSize.height * 0.28 + index * 28;
-      return Rect.fromLTWH(left, top, width, height)
-          .intersect(Offset.zero & canvasSize);
+      return _fallbackDisplayRect(canvasSize, index);
     }
 
     final source = imageSize!;
@@ -11212,6 +12077,17 @@ class _InteractiveBoundingBoxes extends StatelessWidget {
               destinationRect.height,
     );
     return rect.intersect(Offset.zero & canvasSize);
+  }
+
+  Rect _fallbackDisplayRect(Size canvasSize, int index) {
+    final width = math.min(180.0, canvasSize.width * 0.45);
+    final height = math.min(120.0, canvasSize.height * 0.18);
+    final column = index % 2;
+    final row = index ~/ 2;
+    final left = (canvasSize.width - width) / 2 + column * 32 - 16;
+    final top = canvasSize.height * 0.24 + row * (height + 18);
+    return Rect.fromLTWH(left, top, width, height)
+        .intersect(Offset.zero & canvasSize);
   }
 }
 
@@ -12408,15 +13284,19 @@ class ConfirmSpeakPage extends StatefulWidget {
   const ConfirmSpeakPage({
     super.key,
     required this.sentence,
+    required this.personalizedLearningEnabled,
     this.onExitFlow,
     required this.onExpressionCompleted,
     required this.onFavoriteSaved,
+    this.onCandidateSaved,
   });
 
   final String sentence;
+  final bool personalizedLearningEnabled;
   final VoidCallback? onExitFlow;
   final ExpressionCallback onExpressionCompleted;
   final ExpressionCallback onFavoriteSaved;
+  final ExpressionCallback? onCandidateSaved;
 
   @override
   State<ConfirmSpeakPage> createState() => _ConfirmSpeakPageState();
@@ -12448,12 +13328,29 @@ class _ConfirmSpeakPageState extends State<ConfirmSpeakPage> {
     await _tts.speak(widget.sentence);
     if (mounted) {
       setState(() => _isSpeaking = false);
+      _showLearningFeedback(
+        widget.personalizedLearningEnabled ? '已播报，语桥会记住你的选择' : '已播报，个性化学习已关闭',
+      );
     }
   }
 
   Future<void> _saveFavorite() async {
     await widget.onFavoriteSaved(widget.sentence);
+    await widget.onCandidateSaved?.call(widget.sentence);
     setState(() => _saved = true);
+    _showLearningFeedback(
+      widget.personalizedLearningEnabled ? '已收藏，下次会更容易找到' : '已收藏，可在收藏中找到',
+    );
+  }
+
+  void _showLearningFeedback(String message) {
+    if (!mounted) return;
+    showYuqiaoLearningReceipt(
+      context,
+      personalizedLearningEnabled: true,
+      learnedMessage: message,
+      disabledMessage: message,
+    );
   }
 
   void _handleBack() {
@@ -12889,7 +13786,8 @@ class QwenService {
       }
     }
     if (lastError != null) {
-      yuqiaoDebugLog('[Qwen generateSentences] recovered after retry: $lastError');
+      yuqiaoDebugLog(
+          '[Qwen generateSentences] recovered after retry: $lastError');
     }
     final seen = <String>{};
     final sentences = <String>[];
@@ -14081,7 +14979,8 @@ class QwenService {
         .toList();
     final rawBbox = json['bbox'];
     final bbox = normalizeModelBoundingBox(rawBbox);
-    yuqiaoDebugLog('[Camera bbox] object=${objectName is String ? objectName : ''} '
+    yuqiaoDebugLog(
+        '[Camera bbox] object=${objectName is String ? objectName : ''} '
         'raw=$rawBbox normalized=$bbox');
     return ObjectCandidate(
       objectName: objectName is String ? objectName.trim() : '',
@@ -14158,6 +15057,7 @@ class LocalStore implements LocationDataStore {
   static const String _recentKey = 'recent_expressions';
   static const String _favoriteKey = 'favorite_expressions';
   static const String _vocabularyKey = 'vocabulary_entries';
+  static const String _vocabularySeedVersionKey = 'vocabulary_seed_version';
   static const String _expressionPreferenceKey = 'expression_preference_v2';
   static const String _autoStuckDetectionKey = 'auto_stuck_detection_enabled';
   static const String _locationEnabledKey = 'location_recommendation_enabled';
@@ -14192,6 +15092,11 @@ class LocalStore implements LocationDataStore {
         .toList();
   }
 
+  Future<int> loadVocabularySeedVersion() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_vocabularySeedVersionKey) ?? 0;
+  }
+
   Future<void> addRecentExpression(String text) async {
     final prefs = await SharedPreferences.getInstance();
     final existing = prefs.getStringList(_recentKey) ?? const [];
@@ -14212,6 +15117,11 @@ class LocalStore implements LocationDataStore {
     final prefs = await SharedPreferences.getInstance();
     final encoded = entries.map((entry) => jsonEncode(entry.toJson())).toList();
     await prefs.setStringList(_vocabularyKey, encoded);
+  }
+
+  Future<void> saveVocabularySeedVersion(int version) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_vocabularySeedVersionKey, version);
   }
 
   Future<ExpressionPreference> loadExpressionPreference() async {
@@ -14330,30 +15240,238 @@ class VocabularyEntry {
 }
 
 class VocabularyDefaults {
+  static const version = 3;
+
   static const categories = ['人物', '饮食', '地点', '活动', '物品', '感受', '常用句'];
 
   static const entries = [
     VocabularyEntry(id: 'person_mom', category: '人物', text: '妈妈'),
     VocabularyEntry(id: 'person_daughter', category: '人物', text: '女儿'),
     VocabularyEntry(id: 'person_friend', category: '人物', text: '朋友'),
+    VocabularyEntry(id: 'person_dad', category: '人物', text: '爸爸'),
+    VocabularyEntry(id: 'person_son', category: '人物', text: '儿子'),
+    VocabularyEntry(id: 'person_spouse', category: '人物', text: '爱人'),
+    VocabularyEntry(id: 'person_husband', category: '人物', text: '丈夫'),
+    VocabularyEntry(id: 'person_wife', category: '人物', text: '妻子'),
+    VocabularyEntry(id: 'person_grandpa', category: '人物', text: '爷爷'),
+    VocabularyEntry(id: 'person_grandma', category: '人物', text: '奶奶'),
+    VocabularyEntry(id: 'person_maternal_grandpa', category: '人物', text: '外公'),
+    VocabularyEntry(id: 'person_maternal_grandma', category: '人物', text: '外婆'),
+    VocabularyEntry(id: 'person_elder_brother', category: '人物', text: '哥哥'),
+    VocabularyEntry(id: 'person_younger_brother', category: '人物', text: '弟弟'),
+    VocabularyEntry(id: 'person_elder_sister', category: '人物', text: '姐姐'),
+    VocabularyEntry(id: 'person_younger_sister', category: '人物', text: '妹妹'),
+    VocabularyEntry(id: 'person_doctor', category: '人物', text: '医生'),
+    VocabularyEntry(id: 'person_nurse', category: '人物', text: '护士'),
     VocabularyEntry(id: 'food_water', category: '饮食', text: '水'),
     VocabularyEntry(id: 'food_tea', category: '饮食', text: '茶'),
     VocabularyEntry(id: 'food_coffee', category: '饮食', text: '咖啡'),
     VocabularyEntry(id: 'food_fruit', category: '饮食', text: '水果'),
+    VocabularyEntry(id: 'food_rice', category: '饮食', text: '米饭'),
+    VocabularyEntry(id: 'food_porridge', category: '饮食', text: '粥'),
+    VocabularyEntry(id: 'food_noodles', category: '饮食', text: '面条'),
+    VocabularyEntry(id: 'food_steamed_bun', category: '饮食', text: '馒头'),
+    VocabularyEntry(id: 'food_bread', category: '饮食', text: '面包'),
+    VocabularyEntry(id: 'food_egg', category: '饮食', text: '鸡蛋'),
+    VocabularyEntry(id: 'food_milk', category: '饮食', text: '牛奶'),
+    VocabularyEntry(id: 'food_yogurt', category: '饮食', text: '酸奶'),
+    VocabularyEntry(id: 'food_apple', category: '饮食', text: '苹果'),
+    VocabularyEntry(id: 'food_banana', category: '饮食', text: '香蕉'),
+    VocabularyEntry(id: 'food_vegetables', category: '饮食', text: '青菜'),
+    VocabularyEntry(id: 'food_soup', category: '饮食', text: '汤'),
+    VocabularyEntry(id: 'food_chicken', category: '饮食', text: '鸡肉'),
+    VocabularyEntry(id: 'food_fish', category: '饮食', text: '鱼'),
+    VocabularyEntry(id: 'food_beef', category: '饮食', text: '牛肉'),
+    VocabularyEntry(id: 'food_warm_water', category: '饮食', text: '温水'),
+    VocabularyEntry(id: 'food_juice', category: '饮食', text: '果汁'),
+    VocabularyEntry(id: 'food_soy_milk', category: '饮食', text: '豆浆'),
+    VocabularyEntry(id: 'food_dumplings', category: '饮食', text: '饺子'),
+    VocabularyEntry(id: 'food_snack', category: '饮食', text: '点心'),
     VocabularyEntry(id: 'place_home', category: '地点', text: '家里'),
     VocabularyEntry(id: 'place_park', category: '地点', text: '公园'),
     VocabularyEntry(id: 'place_downstairs', category: '地点', text: '楼下'),
+    VocabularyEntry(id: 'place_hospital', category: '地点', text: '医院'),
+    VocabularyEntry(id: 'place_ward', category: '地点', text: '病房'),
+    VocabularyEntry(id: 'place_clinic', category: '地点', text: '门诊'),
+    VocabularyEntry(id: 'place_restroom', category: '地点', text: '卫生间'),
+    VocabularyEntry(id: 'place_bedroom', category: '地点', text: '卧室'),
+    VocabularyEntry(id: 'place_living_room', category: '地点', text: '客厅'),
+    VocabularyEntry(id: 'place_kitchen', category: '地点', text: '厨房'),
+    VocabularyEntry(id: 'place_balcony', category: '地点', text: '阳台'),
+    VocabularyEntry(id: 'place_elevator', category: '地点', text: '电梯'),
+    VocabularyEntry(id: 'place_pharmacy', category: '地点', text: '药房'),
+    VocabularyEntry(id: 'place_supermarket', category: '地点', text: '超市'),
+    VocabularyEntry(id: 'place_bus_stop', category: '地点', text: '公交站'),
+    VocabularyEntry(id: 'place_subway_station', category: '地点', text: '地铁站'),
+    VocabularyEntry(id: 'place_dining_room', category: '地点', text: '餐厅'),
+    VocabularyEntry(id: 'place_rehab_room', category: '地点', text: '康复室'),
     VocabularyEntry(id: 'activity_walk', category: '活动', text: '散步'),
     VocabularyEntry(id: 'activity_rest', category: '活动', text: '休息'),
     VocabularyEntry(id: 'activity_tv', category: '活动', text: '看电视'),
+    VocabularyEntry(id: 'activity_eat', category: '活动', text: '吃饭'),
+    VocabularyEntry(id: 'activity_drink', category: '活动', text: '喝水'),
+    VocabularyEntry(id: 'activity_take_medicine', category: '活动', text: '吃药'),
+    VocabularyEntry(id: 'activity_go_toilet', category: '活动', text: '上厕所'),
+    VocabularyEntry(id: 'activity_sleep', category: '活动', text: '睡觉'),
+    VocabularyEntry(id: 'activity_sit_up', category: '活动', text: '坐起来'),
+    VocabularyEntry(id: 'activity_lie_down', category: '活动', text: '躺下'),
+    VocabularyEntry(id: 'activity_stand_up', category: '活动', text: '站起来'),
+    VocabularyEntry(id: 'activity_wash_face', category: '活动', text: '洗脸'),
+    VocabularyEntry(id: 'activity_brush_teeth', category: '活动', text: '刷牙'),
+    VocabularyEntry(id: 'activity_shower', category: '活动', text: '洗澡'),
+    VocabularyEntry(id: 'activity_change_clothes', category: '活动', text: '换衣服'),
+    VocabularyEntry(id: 'activity_call_phone', category: '活动', text: '打电话'),
+    VocabularyEntry(id: 'activity_listen_music', category: '活动', text: '听音乐'),
+    VocabularyEntry(id: 'activity_exercise', category: '活动', text: '训练'),
     VocabularyEntry(id: 'item_phone', category: '物品', text: '手机'),
     VocabularyEntry(id: 'item_keys', category: '物品', text: '钥匙'),
     VocabularyEntry(id: 'item_glasses', category: '物品', text: '眼镜'),
+    VocabularyEntry(id: 'item_cup', category: '物品', text: '杯子'),
+    VocabularyEntry(id: 'item_bottle', category: '物品', text: '水杯'),
+    VocabularyEntry(id: 'item_bowl', category: '物品', text: '碗'),
+    VocabularyEntry(id: 'item_chopsticks', category: '物品', text: '筷子'),
+    VocabularyEntry(id: 'item_spoon', category: '物品', text: '勺子'),
+    VocabularyEntry(id: 'item_towel', category: '物品', text: '毛巾'),
+    VocabularyEntry(id: 'item_tissue', category: '物品', text: '纸巾'),
+    VocabularyEntry(id: 'item_mask', category: '物品', text: '口罩'),
+    VocabularyEntry(id: 'item_charger', category: '物品', text: '充电器'),
+    VocabularyEntry(id: 'item_remote', category: '物品', text: '遥控器'),
+    VocabularyEntry(id: 'item_wheelchair', category: '物品', text: '轮椅'),
+    VocabularyEntry(id: 'item_cane', category: '物品', text: '拐杖'),
+    VocabularyEntry(id: 'item_blanket', category: '物品', text: '毯子'),
+    VocabularyEntry(id: 'item_pillow', category: '物品', text: '枕头'),
+    VocabularyEntry(id: 'item_medication', category: '物品', text: '药'),
     VocabularyEntry(id: 'feeling_tired', category: '感受', text: '有点累'),
     VocabularyEntry(id: 'feeling_happy', category: '感受', text: '挺好的'),
+    VocabularyEntry(id: 'feeling_pain', category: '感受', text: '疼'),
+    VocabularyEntry(id: 'feeling_dizzy', category: '感受', text: '头晕'),
+    VocabularyEntry(id: 'feeling_thirsty', category: '感受', text: '口渴'),
+    VocabularyEntry(id: 'feeling_hungry', category: '感受', text: '饿了'),
+    VocabularyEntry(id: 'feeling_cold', category: '感受', text: '冷'),
+    VocabularyEntry(id: 'feeling_hot', category: '感受', text: '热'),
+    VocabularyEntry(id: 'feeling_anxious', category: '感受', text: '有点着急'),
+    VocabularyEntry(id: 'feeling_scared', category: '感受', text: '有点害怕'),
+    VocabularyEntry(id: 'feeling_uncomfortable', category: '感受', text: '不舒服'),
+    VocabularyEntry(id: 'feeling_better', category: '感受', text: '好多了'),
     VocabularyEntry(id: 'phrase_again', category: '常用句', text: '请再说一遍'),
     VocabularyEntry(id: 'phrase_slow', category: '常用句', text: '你慢一点说'),
     VocabularyEntry(id: 'phrase_wait', category: '常用句', text: '等我一下'),
+    VocabularyEntry(id: 'phrase_need_help', category: '常用句', text: '我需要帮忙'),
+    VocabularyEntry(id: 'phrase_call_family', category: '常用句', text: '帮我联系家人'),
+    VocabularyEntry(id: 'phrase_call_doctor', category: '常用句', text: '我想叫医生'),
+    VocabularyEntry(id: 'phrase_call_nurse', category: '常用句', text: '我想叫护士'),
+    VocabularyEntry(id: 'phrase_go_restroom', category: '常用句', text: '我想去卫生间'),
+    VocabularyEntry(id: 'phrase_drink_water', category: '常用句', text: '我想喝水'),
+    VocabularyEntry(id: 'phrase_pain_here', category: '常用句', text: '这里疼'),
+    VocabularyEntry(
+        id: 'phrase_explain_again', category: '常用句', text: '请你再解释一下'),
+    VocabularyEntry(id: 'phrase_write_down', category: '常用句', text: '请帮我写下来'),
+    VocabularyEntry(id: 'phrase_thank_you', category: '常用句', text: '谢谢你'),
+    VocabularyEntry(id: 'person_rehab_therapist', category: '人物', text: '康复师'),
+    VocabularyEntry(id: 'person_caregiver', category: '人物', text: '护工'),
+    VocabularyEntry(id: 'person_teacher', category: '人物', text: '老师'),
+    VocabularyEntry(id: 'person_classmate', category: '人物', text: '同学'),
+    VocabularyEntry(id: 'person_neighbor', category: '人物', text: '邻居'),
+    VocabularyEntry(id: 'person_driver', category: '人物', text: '司机'),
+    VocabularyEntry(id: 'person_pharmacist', category: '人物', text: '药师'),
+    VocabularyEntry(id: 'person_security_guard', category: '人物', text: '保安'),
+    VocabularyEntry(id: 'person_volunteer', category: '人物', text: '志愿者'),
+    VocabularyEntry(id: 'person_receptionist', category: '人物', text: '前台'),
+    VocabularyEntry(id: 'person_grandson', category: '人物', text: '孙子'),
+    VocabularyEntry(id: 'person_granddaughter', category: '人物', text: '孙女'),
+    VocabularyEntry(id: 'person_uncle', category: '人物', text: '叔叔'),
+    VocabularyEntry(id: 'person_aunt', category: '人物', text: '阿姨'),
+    VocabularyEntry(id: 'person_colleague', category: '人物', text: '同事'),
+    VocabularyEntry(id: 'food_sweet_potato', category: '饮食', text: '红薯'),
+    VocabularyEntry(id: 'food_potato', category: '饮食', text: '土豆'),
+    VocabularyEntry(id: 'food_pumpkin', category: '饮食', text: '南瓜'),
+    VocabularyEntry(id: 'food_tofu', category: '饮食', text: '豆腐'),
+    VocabularyEntry(id: 'food_tomato', category: '饮食', text: '西红柿'),
+    VocabularyEntry(id: 'food_cucumber', category: '饮食', text: '黄瓜'),
+    VocabularyEntry(id: 'food_carrot', category: '饮食', text: '胡萝卜'),
+    VocabularyEntry(id: 'food_corn', category: '饮食', text: '玉米'),
+    VocabularyEntry(id: 'food_wonton', category: '饮食', text: '馄饨'),
+    VocabularyEntry(id: 'food_baozi', category: '饮食', text: '包子'),
+    VocabularyEntry(id: 'food_flower_roll', category: '饮食', text: '花卷'),
+    VocabularyEntry(id: 'food_cake', category: '饮食', text: '蛋糕'),
+    VocabularyEntry(id: 'food_biscuit', category: '饮食', text: '饼干'),
+    VocabularyEntry(id: 'food_salt', category: '饮食', text: '盐'),
+    VocabularyEntry(id: 'food_sugar', category: '饮食', text: '糖'),
+    VocabularyEntry(id: 'place_consulting_room', category: '地点', text: '诊室'),
+    VocabularyEntry(id: 'place_exam_room', category: '地点', text: '检查室'),
+    VocabularyEntry(id: 'place_infusion_room', category: '地点', text: '输液室'),
+    VocabularyEntry(id: 'place_nurse_station', category: '地点', text: '护士站'),
+    VocabularyEntry(id: 'place_waiting_area', category: '地点', text: '候诊区'),
+    VocabularyEntry(id: 'place_garden', category: '地点', text: '花园'),
+    VocabularyEntry(id: 'place_community', category: '地点', text: '小区'),
+    VocabularyEntry(id: 'place_bank', category: '地点', text: '银行'),
+    VocabularyEntry(id: 'place_station', category: '地点', text: '车站'),
+    VocabularyEntry(id: 'place_school', category: '地点', text: '学校'),
+    VocabularyEntry(id: 'place_study_room', category: '地点', text: '书房'),
+    VocabularyEntry(id: 'place_corridor', category: '地点', text: '走廊'),
+    VocabularyEntry(id: 'place_upstairs', category: '地点', text: '楼上'),
+    VocabularyEntry(id: 'place_entrance', category: '地点', text: '门口'),
+    VocabularyEntry(id: 'place_parking_lot', category: '地点', text: '停车场'),
+    VocabularyEntry(id: 'activity_get_up', category: '活动', text: '起床'),
+    VocabularyEntry(id: 'activity_measure_bp', category: '活动', text: '量血压'),
+    VocabularyEntry(
+        id: 'activity_take_temperature', category: '活动', text: '测体温'),
+    VocabularyEntry(id: 'activity_follow_up', category: '活动', text: '复查'),
+    VocabularyEntry(id: 'activity_queue', category: '活动', text: '排队'),
+    VocabularyEntry(id: 'activity_pay', category: '活动', text: '付款'),
+    VocabularyEntry(id: 'activity_buy_medicine', category: '活动', text: '买药'),
+    VocabularyEntry(id: 'activity_medical_exam', category: '活动', text: '做检查'),
+    VocabularyEntry(
+        id: 'activity_rehab_training', category: '活动', text: '康复训练'),
+    VocabularyEntry(id: 'activity_write', category: '活动', text: '写字'),
+    VocabularyEntry(id: 'activity_read', category: '活动', text: '读书'),
+    VocabularyEntry(id: 'activity_take_photo', category: '活动', text: '拍照'),
+    VocabularyEntry(id: 'activity_send_message', category: '活动', text: '发消息'),
+    VocabularyEntry(id: 'activity_turn_on_light', category: '活动', text: '开灯'),
+    VocabularyEntry(id: 'activity_turn_off_light', category: '活动', text: '关灯'),
+    VocabularyEntry(id: 'item_bed', category: '物品', text: '床'),
+    VocabularyEntry(id: 'item_chair', category: '物品', text: '椅子'),
+    VocabularyEntry(id: 'item_table', category: '物品', text: '桌子'),
+    VocabularyEntry(id: 'item_door', category: '物品', text: '门'),
+    VocabularyEntry(id: 'item_light', category: '物品', text: '灯'),
+    VocabularyEntry(id: 'item_air_conditioner', category: '物品', text: '空调'),
+    VocabularyEntry(id: 'item_tv', category: '物品', text: '电视'),
+    VocabularyEntry(id: 'item_rice_cooker', category: '物品', text: '电饭煲'),
+    VocabularyEntry(id: 'item_thermometer', category: '物品', text: '体温计'),
+    VocabularyEntry(
+        id: 'item_blood_pressure_meter', category: '物品', text: '血压计'),
+    VocabularyEntry(id: 'item_medical_record', category: '物品', text: '病历'),
+    VocabularyEntry(
+        id: 'item_medical_insurance_card', category: '物品', text: '医保卡'),
+    VocabularyEntry(id: 'item_id_card', category: '物品', text: '身份证'),
+    VocabularyEntry(id: 'item_wallet', category: '物品', text: '钱包'),
+    VocabularyEntry(id: 'item_umbrella', category: '物品', text: '雨伞'),
+    VocabularyEntry(id: 'feeling_nauseous', category: '感受', text: '想吐'),
+    VocabularyEntry(id: 'feeling_sick', category: '感受', text: '恶心'),
+    VocabularyEntry(id: 'feeling_chest_tight', category: '感受', text: '胸闷'),
+    VocabularyEntry(id: 'feeling_short_breath', category: '感受', text: '气短'),
+    VocabularyEntry(id: 'feeling_cough', category: '感受', text: '咳嗽'),
+    VocabularyEntry(id: 'feeling_fever', category: '感受', text: '发烧'),
+    VocabularyEntry(id: 'feeling_chills', category: '感受', text: '发冷'),
+    VocabularyEntry(id: 'feeling_sweating', category: '感受', text: '出汗'),
+    VocabularyEntry(id: 'feeling_insomnia', category: '感受', text: '睡不着'),
+    VocabularyEntry(id: 'feeling_weak', category: '感受', text: '没力气'),
+    VocabularyEntry(id: 'feeling_hand_numb', category: '感受', text: '手麻'),
+    VocabularyEntry(id: 'feeling_leg_numb', category: '感受', text: '腿麻'),
+    VocabularyEntry(id: 'feeling_palpitations', category: '感受', text: '心慌'),
+    VocabularyEntry(id: 'feeling_blurred_vision', category: '感受', text: '眼花'),
+    VocabularyEntry(id: 'feeling_stomach_unwell', category: '感受', text: '胃不舒服'),
+    VocabularyEntry(id: 'phrase_cannot_hear', category: '常用句', text: '我听不清'),
+    VocabularyEntry(id: 'phrase_support_me', category: '常用句', text: '请扶我一下'),
+    VocabularyEntry(id: 'phrase_turn_on_light', category: '常用句', text: '请把灯打开'),
+    VocabularyEntry(
+        id: 'phrase_turn_off_light', category: '常用句', text: '请把灯关掉'),
+    VocabularyEntry(id: 'phrase_volume_up', category: '常用句', text: '请帮我调高一点'),
+    VocabularyEntry(id: 'phrase_volume_down', category: '常用句', text: '请帮我调低一点'),
+    VocabularyEntry(id: 'phrase_rest_awhile', category: '常用句', text: '我想休息一会儿'),
+    VocabularyEntry(id: 'phrase_sit_up', category: '常用句', text: '我想坐起来'),
+    VocabularyEntry(id: 'phrase_lie_down', category: '常用句', text: '我想躺下'),
+    VocabularyEntry(id: 'phrase_better_now', category: '常用句', text: '我现在好多了'),
   ];
 }
 

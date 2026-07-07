@@ -7,6 +7,7 @@ import 'conversation_terms.dart';
 import 'expression_habits.dart';
 import 'location_recommendation.dart';
 import 'personal_objects.dart';
+import 'user_learning.dart';
 
 enum CompanionFeedbackAction {
   accepted,
@@ -164,6 +165,9 @@ class CompanionAgentDebugSnapshot {
     required this.memorySignals,
     required this.rankedPreview,
     required this.rankedExplanations,
+    required this.preferenceProfileSummary,
+    required this.learningLoopSummary,
+    required this.adaptiveActionPlan,
     required this.feedbackProfile,
     required this.globalFeedbackProfile,
     required this.actionBias,
@@ -178,6 +182,9 @@ class CompanionAgentDebugSnapshot {
   final List<String> memorySignals;
   final List<String> rankedPreview;
   final List<CompanionRankedExplanation> rankedExplanations;
+  final List<String> preferenceProfileSummary;
+  final List<String> learningLoopSummary;
+  final CompanionActionPlan adaptiveActionPlan;
   final CompanionFeedbackProfile feedbackProfile;
   final CompanionFeedbackProfile globalFeedbackProfile;
   final CompanionActionBias actionBias;
@@ -190,6 +197,7 @@ class CompanionRankedExplanation {
     required this.totalScore,
     required this.baseScore,
     required this.memoryScore,
+    required this.preferenceScore,
     required this.feedbackScore,
     this.reason = '',
   });
@@ -198,11 +206,16 @@ class CompanionRankedExplanation {
   final double totalScore;
   final double baseScore;
   final double memoryScore;
+  final double preferenceScore;
   final double feedbackScore;
   final String reason;
 
   String get scoreSummary {
     String fmt(double value) => value.toStringAsFixed(0);
+    if (preferenceScore.isFinite) {
+      final profileReasonText = reason.isEmpty ? '' : '; reason $reason';
+      return 'total ${fmt(totalScore)}; base ${fmt(baseScore)}; memory ${fmt(memoryScore)}; profile ${fmt(preferenceScore)}; feedback ${fmt(feedbackScore)}$profileReasonText';
+    }
     final reasonText = reason.isEmpty ? '' : '；$reason';
     return '总分 ${fmt(totalScore)}；基础 ${fmt(baseScore)}；记忆 ${fmt(memoryScore)}；反馈 ${fmt(feedbackScore)}$reasonText';
   }
@@ -320,11 +333,18 @@ class CompanionAgentController {
   CompanionAgentController({
     required LocationRecommendationController locationController,
     CompanionFeedbackStore? feedbackStore,
+    UserLearningStore? userLearningStore,
+    void Function(UserPreferenceProfile profile)? onPreferenceProfileChanged,
   })  : _locationController = locationController,
-        _feedbackStore = feedbackStore ?? CompanionFeedbackStore();
+        _feedbackStore = feedbackStore ?? CompanionFeedbackStore(),
+        _userLearningStore = userLearningStore ?? UserLearningStore(),
+        _onPreferenceProfileChanged = onPreferenceProfileChanged;
 
   final LocationRecommendationController _locationController;
   final CompanionFeedbackStore _feedbackStore;
+  final UserLearningStore _userLearningStore;
+  final void Function(UserPreferenceProfile profile)?
+      _onPreferenceProfileChanged;
 
   List<String> _recentExpressions = const [];
   List<String> _favoriteExpressions = const [];
@@ -335,6 +355,7 @@ class CompanionAgentController {
   String _latestUserFragment = '';
   String _userSpeakerLabel = '';
   bool _learningEnabled = true;
+  UserPreferenceProfile _preferenceProfile = UserPreferenceProfile.empty;
 
   void updateMemory({
     required List<String> recentExpressions,
@@ -508,6 +529,9 @@ class CompanionAgentController {
             slot: inferredSlot,
           )
         : const CompanionFeedbackProfile(accepted: {}, rejected: {});
+    final preferenceProfile = _learningEnabled
+        ? await _currentPreferenceProfile()
+        : UserPreferenceProfile.empty;
     final candidates = <String>[
       ...locationRanked,
       if (includeContextWords && allowContextExpansion)
@@ -536,6 +560,12 @@ class CompanionAgentController {
         category: category ?? feature,
         slot: inferredSlot,
       );
+      final preferenceScore = _preferenceScore(
+        clean,
+        context,
+        slot: inferredSlot,
+        profile: preferenceProfile,
+      );
       final contextFeedbackScore = feedback.scoreFor(clean);
       final globalFeedbackScore = _softGlobalFeedbackScore(
         globalFeedback.scoreFor(clean),
@@ -546,15 +576,17 @@ class CompanionAgentController {
       final feedbackScore = contextFeedbackScore + globalFeedbackScore;
       scored.add(_CompanionScoredText(
         text: clean,
-        score: baseScore + memoryScore + feedbackScore,
+        score: baseScore + memoryScore + preferenceScore + feedbackScore,
         baseScore: baseScore,
         memoryScore: memoryScore,
+        preferenceScore: preferenceScore,
         feedbackScore: feedbackScore,
         reason: _candidateReason(
           clean,
           context,
           slot: inferredSlot,
           memoryScore: memoryScore,
+          preferenceScore: preferenceScore,
           contextFeedbackScore: contextFeedbackScore,
           globalFeedbackScore: globalFeedbackScore,
         ),
@@ -590,6 +622,16 @@ class CompanionAgentController {
     final recentFeedbackEvents = _learningEnabled
         ? await _feedbackStore.recentEventsForContextKeys(keys)
         : <String>[];
+    final preferenceProfile = _learningEnabled
+        ? await _currentPreferenceProfile()
+        : UserPreferenceProfile.empty;
+    final adaptiveActionPlan = await adaptivePlanFor(
+      feature: feature,
+      prompt: prompt,
+      slot: inferredSlot,
+      userRequested: feature == 'conversation' || feature == 'stuck',
+      autoDetectionEnabled: autoDetectionEnabled,
+    );
     final memorySignals = personalWordsForPrompt(
       feature: feature,
       prompt: prompt,
@@ -620,6 +662,7 @@ class CompanionAgentController {
               totalScore: item.score,
               baseScore: item.baseScore,
               memoryScore: item.memoryScore,
+              preferenceScore: item.preferenceScore,
               feedbackScore: item.feedbackScore,
               reason: item.reason,
             ))
@@ -638,6 +681,9 @@ class CompanionAgentController {
       memorySignals: memorySignals,
       rankedPreview: rankedPreview,
       rankedExplanations: rankedExplanations,
+      preferenceProfileSummary: preferenceProfile.displaySummaryLines(limit: 8),
+      learningLoopSummary: preferenceProfile.stats.displayLines(limit: 5),
+      adaptiveActionPlan: adaptiveActionPlan,
       feedbackProfile: feedback,
       globalFeedbackProfile: globalFeedback,
       actionBias: actionBias,
@@ -680,11 +726,19 @@ class CompanionAgentController {
     final bias = await _feedbackStore.actionBiasForContextKeys(
       feedbackContextKeys(context, slot: inferredSlot),
     );
-    return _adaptPlanWithActionBias(
+    final profile = await _currentPreferenceProfile();
+    final locallyAdapted = _adaptPlanWithActionBias(
       base,
       context,
       slot: inferredSlot,
       bias: bias,
+      userRequested: userRequested,
+    );
+    return _adaptPlanWithPreferenceProfile(
+      locallyAdapted,
+      context,
+      slot: inferredSlot,
+      profile: profile,
       userRequested: userRequested,
     );
   }
@@ -804,9 +858,11 @@ class CompanionAgentController {
       feature: feature,
       limit: 6,
     );
+    final preferenceProfile = await _currentPreferenceProfile();
     final hints = <String>[
       '智能体行动计划：${plan.modelInstruction}',
       ...baseHints,
+      ...preferenceProfile.promptHints(limit: 8),
       if (feedback.topAccepted.isNotEmpty)
         '类似语境中用户更常确认：${feedback.topAccepted.join('、')}',
       if (feedback.topRejected.isNotEmpty)
@@ -824,17 +880,27 @@ class CompanionAgentController {
     required CompanionFeedbackAction action,
     String prompt = '',
     RecommendationSlot? slot,
-  }) {
-    if (!_learningEnabled) return Future<void>.value();
+    String? objectTag,
+  }) async {
+    if (!_learningEnabled) return;
     final context = contextFor(feature: feature, prompt: prompt);
-    return _feedbackStore.record(
+    final inferredSlot = slot ?? RecommendationContext.inferSlot(prompt);
+    await _feedbackStore.record(
       contextKey: contextKey(
         context,
-        slot: slot ?? RecommendationContext.inferSlot(prompt),
+        slot: inferredSlot,
       ),
       text: text,
       feature: feature,
       action: action,
+    );
+    await _recordLearningEvent(
+      text: text,
+      feature: feature,
+      action: action,
+      context: context,
+      slot: inferredSlot,
+      objectTagOverride: objectTag,
     );
   }
 
@@ -844,18 +910,140 @@ class CompanionAgentController {
     required CompanionFeedbackAction action,
     String prompt = '',
     RecommendationSlot? slot,
-  }) {
-    if (!_learningEnabled) return Future<void>.value();
+  }) async {
+    if (!_learningEnabled) return;
     final context = contextFor(feature: feature, prompt: prompt);
-    return _feedbackStore.recordActionPlan(
+    final inferredSlot = slot ?? RecommendationContext.inferSlot(prompt);
+    await _feedbackStore.recordActionPlan(
       contextKey: contextKey(
         context,
-        slot: slot ?? RecommendationContext.inferSlot(prompt),
+        slot: inferredSlot,
       ),
       type: type,
       feature: feature,
       action: action,
     );
+    await _recordActionPlanLearningEvent(
+      type: type,
+      feature: feature,
+      action: action,
+      context: context,
+      slot: inferredSlot,
+    );
+  }
+
+  Future<UserPreferenceProfile> _currentPreferenceProfile() async {
+    _preferenceProfile = await _userLearningStore.loadProfile();
+    return _preferenceProfile;
+  }
+
+  Future<void> _recordLearningEvent({
+    required String text,
+    required String feature,
+    required CompanionFeedbackAction action,
+    required UserContextModel context,
+    required RecommendationSlot slot,
+    String? objectTagOverride,
+  }) async {
+    final clean = text.trim();
+    final normalized = LocationRecommendationController.normalizeText(clean);
+    if (clean.isEmpty || normalized.isEmpty) return;
+    final event = UserLearningEvent(
+      feature: feature,
+      action: action.name,
+      text: clean,
+      normalizedText: normalized,
+      intentTag: _intentTagFor(clean, context, slot),
+      objectTag: _normalizedObjectTag(objectTagOverride) ??
+          _objectTagFor(clean, context),
+      placeType: context.placeType,
+      timeBucket: context.timeBucket,
+      slotName: slot.name,
+      createdAt: DateTime.now(),
+    );
+    await _userLearningStore.record(event);
+    _preferenceProfile = await _userLearningStore.loadProfile();
+    _onPreferenceProfileChanged?.call(_preferenceProfile);
+  }
+
+  String? _normalizedObjectTag(String? value) {
+    final normalized = LocationRecommendationController.normalizeText(
+      value?.trim() ?? '',
+    );
+    return normalized.isEmpty ? null : normalized;
+  }
+
+  Future<void> _recordActionPlanLearningEvent({
+    required CompanionActionType type,
+    required String feature,
+    required CompanionFeedbackAction action,
+    required UserContextModel context,
+    required RecommendationSlot slot,
+  }) async {
+    final text = 'action:${type.name}';
+    final event = UserLearningEvent(
+      feature: feature,
+      action: action.name,
+      text: text,
+      normalizedText: text,
+      intentTag: 'action_plan_${type.name}',
+      objectTag: '',
+      placeType: context.placeType,
+      timeBucket: context.timeBucket,
+      slotName: slot.name,
+      createdAt: DateTime.now(),
+    );
+    await _userLearningStore.record(event);
+    _preferenceProfile = await _userLearningStore.loadProfile();
+    _onPreferenceProfileChanged?.call(_preferenceProfile);
+  }
+
+  String _intentTagFor(
+    String text,
+    UserContextModel context,
+    RecommendationSlot slot,
+  ) {
+    final combined = '${context.latestUserFragment} $text';
+    if (RegExp(r'什么时候|几点|多久|时间|现在|今天|明天').hasMatch(combined)) {
+      return 'ask_time';
+    }
+    if (RegExp(r'哪里|在哪|找|寻找|拿|递|给我').hasMatch(combined)) {
+      return 'find_or_get';
+    }
+    if (RegExp(r'疼|痛|难受|不舒服|累|害怕|紧张').hasMatch(combined)) {
+      return 'discomfort';
+    }
+    if (RegExp(r'再说|慢一点|什么意思|听不懂|不明白').hasMatch(combined)) {
+      return 'understand';
+    }
+    if (RegExp(r'不是|说错|是不是|对吗|确认').hasMatch(combined)) {
+      return 'clarify';
+    }
+    if (RegExp(r'帮我|能不能|可以|请').hasMatch(combined)) {
+      return 'request_help';
+    }
+    return slot == RecommendationSlot.sentence ? 'say_sentence' : slot.name;
+  }
+
+  String _objectTagFor(String text, UserContextModel context) {
+    final normalized = LocationRecommendationController.normalizeText(text);
+    for (final object in context.personalObjects) {
+      final objectName =
+          LocationRecommendationController.normalizeText(object.displayName);
+      if (objectName.isNotEmpty &&
+          (normalized.contains(objectName) ||
+              objectName.contains(normalized))) {
+        return objectName;
+      }
+      for (final phrase in object.commonExpressions) {
+        final normalizedPhrase =
+            LocationRecommendationController.normalizeText(phrase);
+        if (normalizedPhrase.isNotEmpty && normalized == normalizedPhrase) {
+          return objectName;
+        }
+      }
+    }
+    return '';
   }
 
   Future<void> recordRejectedBatch({
@@ -980,6 +1168,74 @@ class CompanionAgentController {
       priority: (base.priority + baseScore.round()).clamp(10, 96),
       evidence: evidence,
     );
+  }
+
+  CompanionActionPlan _adaptPlanWithPreferenceProfile(
+    CompanionActionPlan base,
+    UserContextModel context, {
+    required RecommendationSlot slot,
+    required UserPreferenceProfile profile,
+    required bool userRequested,
+  }) {
+    if (profile.actionPlanPreferences.isEmpty) return base;
+    final baseScore = profile.actionPlanPreferences[base.type.name] ?? 0;
+    final preferredEntry = profile.actionPlanPreferences.entries
+        .where((entry) => entry.value > 0)
+        .toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final preferred = preferredEntry.isEmpty
+        ? null
+        : _actionTypeFromName(preferredEntry.first.key);
+    final preferredScore = preferred == null
+        ? double.negativeInfinity
+        : preferredEntry.first.value;
+    final evidence = <String>[
+      ...base.evidence,
+      if (baseScore != 0)
+        '长期画像对${base.type.label}的反馈强度 ${baseScore.toStringAsFixed(1)}',
+      if (preferred != null && preferred != base.type)
+        '长期画像更常接受：${preferred.label}',
+    ];
+
+    if (!userRequested &&
+        baseScore <= -2 &&
+        (preferred == null || preferredScore <= 0)) {
+      return _planFromActionType(
+        CompanionActionType.observe,
+        context,
+        slot: slot,
+        priority: math.max(15, base.priority - 18),
+        evidence: [
+          ...evidence,
+          '长期画像显示用户较少接受该类自动辅助，先继续观察',
+        ],
+      );
+    }
+
+    if (preferred != null &&
+        preferred != base.type &&
+        preferredScore >= math.max(2.0, baseScore + 2.0)) {
+      return _planFromActionType(
+        preferred,
+        context,
+        slot: slot,
+        priority: math.min(96, base.priority + 6),
+        evidence: evidence,
+      );
+    }
+
+    if (evidence.length == base.evidence.length) return base;
+    return base.copyWith(
+      priority: (base.priority + baseScore.round()).clamp(10, 96),
+      evidence: evidence,
+    );
+  }
+
+  CompanionActionType? _actionTypeFromName(String value) {
+    for (final type in CompanionActionType.values) {
+      if (type.name == value) return type;
+    }
+    return null;
   }
 
   CompanionActionPlan _planFromActionType(
@@ -1116,6 +1372,32 @@ class CompanionAgentController {
     return score;
   }
 
+  double _preferenceScore(
+    String text,
+    UserContextModel context, {
+    required RecommendationSlot slot,
+    required UserPreferenceProfile profile,
+  }) {
+    if (!profile.hasSignal || !_fitsSlot(text, slot)) return 0;
+    var score =
+        profile.hasExpressionSlotMismatch(text, slot.name) ? -520.0 : 0.0;
+    score += profile.expressionScore(text, slotName: slot.name);
+    score += profile.contextualScoreFor(
+      text,
+      feature: context.feature,
+      placeType: context.placeType,
+      slotName: slot.name,
+    );
+    final normalized = LocationRecommendationController.normalizeText(text);
+    final objectMatches = profile.objectPatterns.where((signal) {
+      return signal.key.contains(normalized) ||
+          signal.latestText.contains(text) ||
+          text.contains(signal.latestText);
+    }).length;
+    if (objectMatches > 0) score += math.min(objectMatches, 2) * 46.0;
+    return score.clamp(-900.0, 900.0).toDouble();
+  }
+
   double _softGlobalFeedbackScore(
     double rawScore,
     UserContextModel context,
@@ -1145,11 +1427,18 @@ class CompanionAgentController {
     UserContextModel context, {
     required RecommendationSlot slot,
     required double memoryScore,
+    required double preferenceScore,
     required double contextFeedbackScore,
     required double globalFeedbackScore,
   }) {
     final normalized = LocationRecommendationController.normalizeText(text);
     final reasons = <String>[];
+    if (preferenceScore > 0) {
+      reasons.add('long-term user profile');
+    }
+    if (preferenceScore < 0) {
+      reasons.add('long-term low preference');
+    }
     if (contextFeedbackScore > 0) reasons.add('类似场景常确认');
     if (contextFeedbackScore < 0) reasons.add('曾被跳过，已降低优先级');
     if (contextFeedbackScore == 0 && globalFeedbackScore > 0) {
@@ -1528,12 +1817,8 @@ class CompanionFeedbackStore {
         .toList(growable: false);
     final accepted = <String, int>{};
     final rejected = <String, int>{};
-    final countedEvents = <String>{};
     for (final entry in entries.where((item) => _matchesAnyKey(item, keys))) {
       if (_isActionPlanEntry(entry)) continue;
-      final eventKey =
-          '${entry.createdAt.toIso8601String()}|${entry.action}|${entry.normalizedText}';
-      if (!countedEvents.add(eventKey)) continue;
       if (_isPositive(entry.action)) {
         accepted.update(entry.normalizedText, (value) => value + 1,
             ifAbsent: () => 1);
@@ -1555,14 +1840,10 @@ class CompanionFeedbackStore {
     final entries = await _load();
     final accepted = <String, int>{};
     final rejected = <String, int>{};
-    final countedEvents = <String>{};
     for (final entry in entries) {
       if (_isActionPlanEntry(entry)) continue;
       if (feature != null && entry.feature != feature) continue;
       if (slot != null && !_entryMatchesSlot(entry, slot)) continue;
-      final eventKey =
-          '${entry.createdAt.toIso8601String()}|${entry.action}|${entry.normalizedText}';
-      if (!countedEvents.add(eventKey)) continue;
       if (_isPositive(entry.action)) {
         accepted.update(entry.normalizedText, (value) => value + 1,
             ifAbsent: () => 1);
@@ -1587,14 +1868,10 @@ class CompanionFeedbackStore {
         .toList(growable: false);
     final accepted = <CompanionActionType, int>{};
     final rejected = <CompanionActionType, int>{};
-    final countedEvents = <String>{};
     for (final entry in entries.where((item) => _matchesAnyKey(item, keys))) {
       if (!_isActionPlanEntry(entry)) continue;
       final actionType = _actionTypeForEntry(entry);
       if (actionType == null) continue;
-      final eventKey =
-          '${entry.createdAt.toIso8601String()}|${entry.action}|${entry.text}';
-      if (!countedEvents.add(eventKey)) continue;
       if (_isPositive(entry.action)) {
         accepted.update(actionType, (value) => value + 1, ifAbsent: () => 1);
       } else if (_isNegative(entry.action)) {
@@ -1798,6 +2075,7 @@ class _CompanionScoredText {
     required this.score,
     required this.baseScore,
     required this.memoryScore,
+    required this.preferenceScore,
     required this.feedbackScore,
     required this.reason,
   });
@@ -1806,6 +2084,7 @@ class _CompanionScoredText {
   final double score;
   final double baseScore;
   final double memoryScore;
+  final double preferenceScore;
   final double feedbackScore;
   final String reason;
 }

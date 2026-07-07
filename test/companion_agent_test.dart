@@ -177,6 +177,71 @@ void main() {
       expect(plan.evidence.join('\n'), contains('相似语境更常接受'));
     });
 
+    test('uses long-term profile to adapt plans across contexts', () async {
+      for (var i = 0; i < 3; i++) {
+        await agent.recordActionPlanFeedback(
+          type: CompanionActionType.clarify,
+          feature: 'conversation',
+          action: CompanionFeedbackAction.accepted,
+          prompt: '之前不确定',
+          slot: RecommendationSlot.sentence,
+        );
+      }
+
+      agent.updateConversationContext(
+        transcript: '我想',
+        latestUserFragment: '我想',
+        userSpeakerLabel: '说话者1',
+      );
+
+      final plan = await agent.adaptivePlanFor(
+        feature: 'conversation',
+        prompt: '全新的片段',
+        slot: RecommendationSlot.sentence,
+        userRequested: true,
+      );
+
+      expect(plan.type, CompanionActionType.clarify);
+      expect(plan.evidence.join('\n'), contains('长期画像更常接受'));
+    });
+
+    test('debug snapshot exposes long-term profile decision evidence',
+        () async {
+      await agent.recordInteraction(
+        text: '请等我一下',
+        feature: 'conversation',
+        action: CompanionFeedbackAction.saved,
+        prompt: '我说不出来',
+        slot: RecommendationSlot.sentence,
+      );
+      for (var i = 0; i < 3; i++) {
+        await agent.recordActionPlanFeedback(
+          type: CompanionActionType.clarify,
+          feature: 'conversation',
+          action: CompanionFeedbackAction.accepted,
+          prompt: '之前不确定',
+          slot: RecommendationSlot.sentence,
+        );
+      }
+
+      final snapshot = await agent.debugSnapshot(
+        feature: 'conversation',
+        prompt: '全新的片段',
+        baseWords: const ['请等我一下', '我想喝水'],
+        slot: RecommendationSlot.sentence,
+      );
+
+      expect(snapshot.preferenceProfileSummary.join('\n'), contains('常用表达'));
+      expect(snapshot.preferenceProfileSummary.join('\n'), contains('帮助方式'));
+      expect(snapshot.learningLoopSummary.join('\n'), contains('学习闭环'));
+      expect(snapshot.adaptiveActionPlan.type, CompanionActionType.clarify);
+      expect(
+        snapshot.adaptiveActionPlan.evidence.join('\n'),
+        contains('长期画像更常接受'),
+      );
+      expect(snapshot.rankedExplanations.first.scoreSummary, contains('profile'));
+    });
+
     test('downgrades repeated skipped auto prompts to observe', () async {
       agent.updateConversationContext(
         transcript: '我想',
