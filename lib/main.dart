@@ -100,13 +100,16 @@ class ExpressionPreference {
   const ExpressionPreference({
     this.preferredCandidateCount = 2,
     this.displayMode = 'mixed',
+    this.imageScale = 1.0,
   });
 
   final int preferredCandidateCount;
   final String displayMode;
+  final double imageScale;
 
   int get effectiveCandidateCount =>
       preferredCandidateCount.clamp(2, 6).toInt();
+  double get effectiveImageScale => imageScale.clamp(0.85, 1.55).toDouble();
 
   String get summary {
     final countLabel = switch (effectiveCandidateCount) {
@@ -120,20 +123,151 @@ class ExpressionPreference {
       'imageFirst' => '图片优先',
       _ => '图文一起',
     };
-    return '$countLabel · $modeLabel';
+    final imageLabel = switch (effectiveImageScale) {
+      <= 0.9 => '小图标',
+      >= 1.45 => '特大图标',
+      >= 1.2 => '大图标',
+      _ => '标准图标',
+    };
+    return '$countLabel · $modeLabel · $imageLabel';
   }
 
   Map<String, dynamic> toJson() => {
         'preferredCandidateCount': effectiveCandidateCount,
         'displayMode': displayMode,
+        'imageScale': effectiveImageScale,
       };
 
   static ExpressionPreference fromJson(Map<String, dynamic> json) {
     final count = json['preferredCandidateCount'];
     final mode = json['displayMode'];
+    final scale = json['imageScale'];
     return ExpressionPreference(
       preferredCandidateCount: count is int ? count.clamp(2, 6).toInt() : 2,
       displayMode: mode is String && mode.isNotEmpty ? mode : 'mixed',
+      imageScale:
+          scale is num ? scale.toDouble().clamp(0.85, 1.55).toDouble() : 1.0,
+    );
+  }
+}
+
+class SupportProfile {
+  const SupportProfile({
+    this.completed = false,
+    this.difficulties = const ['找词'],
+    this.scenes = const ['家里'],
+    this.cuePreferences = const ['图片'],
+    this.trainingMinutes = 3,
+    this.candidateCount = 2,
+    this.needsFamilyAssist = false,
+    this.rememberChoices = true,
+    this.createdAt,
+  });
+
+  final bool completed;
+  final List<String> difficulties;
+  final List<String> scenes;
+  final List<String> cuePreferences;
+  final int trainingMinutes;
+  final int candidateCount;
+  final bool needsFamilyAssist;
+  final bool rememberChoices;
+  final DateTime? createdAt;
+
+  bool get prefersImages =>
+      cuePreferences.contains('图片') ||
+      difficulties.contains('看字写字') ||
+      difficulties.contains('听懂别人');
+  bool get prefersLargeText =>
+      cuePreferences.contains('文字') || difficulties.contains('听懂别人');
+  bool get needsLargeTouchTargets =>
+      difficulties.contains('手部操作') || cuePreferences.contains('大按钮');
+
+  ExpressionPreference toExpressionPreference() {
+    final displayMode = prefersImages
+        ? 'imageFirst'
+        : prefersLargeText
+            ? 'largeText'
+            : 'mixed';
+    final imageScale = needsLargeTouchTargets
+        ? 1.55
+        : prefersImages
+            ? 1.35
+            : 1.0;
+    final effectiveCount =
+        difficulties.contains('听懂别人') || needsLargeTouchTargets
+            ? 2
+            : candidateCount;
+    return ExpressionPreference(
+      preferredCandidateCount: effectiveCount.clamp(2, 6).toInt(),
+      displayMode: displayMode,
+      imageScale: imageScale,
+    );
+  }
+
+  SupportProfile copyWith({
+    bool? completed,
+    List<String>? difficulties,
+    List<String>? scenes,
+    List<String>? cuePreferences,
+    int? trainingMinutes,
+    int? candidateCount,
+    bool? needsFamilyAssist,
+    bool? rememberChoices,
+    DateTime? createdAt,
+  }) {
+    return SupportProfile(
+      completed: completed ?? this.completed,
+      difficulties: difficulties ?? this.difficulties,
+      scenes: scenes ?? this.scenes,
+      cuePreferences: cuePreferences ?? this.cuePreferences,
+      trainingMinutes: trainingMinutes ?? this.trainingMinutes,
+      candidateCount: candidateCount ?? this.candidateCount,
+      needsFamilyAssist: needsFamilyAssist ?? this.needsFamilyAssist,
+      rememberChoices: rememberChoices ?? this.rememberChoices,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'completed': completed,
+        'difficulties': difficulties,
+        'scenes': scenes,
+        'cuePreferences': cuePreferences,
+        'trainingMinutes': trainingMinutes,
+        'candidateCount': candidateCount,
+        'needsFamilyAssist': needsFamilyAssist,
+        'rememberChoices': rememberChoices,
+        'createdAt': createdAt?.toIso8601String(),
+      };
+
+  static SupportProfile fromJson(Map<String, dynamic> json) {
+    List<String> readStringList(String key, List<String> fallback) {
+      final raw = json[key];
+      if (raw is List) {
+        final values = raw.whereType<String>().where((item) {
+          return item.trim().isNotEmpty;
+        }).toList();
+        if (values.isNotEmpty) return values;
+      }
+      return fallback;
+    }
+
+    final createdRaw = json['createdAt'];
+    return SupportProfile(
+      completed: json['completed'] == true,
+      difficulties: readStringList('difficulties', const ['找词']),
+      scenes: readStringList('scenes', const ['家里']),
+      cuePreferences: readStringList('cuePreferences', const ['图片']),
+      trainingMinutes: json['trainingMinutes'] is int
+          ? (json['trainingMinutes'] as int).clamp(3, 10).toInt()
+          : 3,
+      candidateCount: json['candidateCount'] is int
+          ? (json['candidateCount'] as int).clamp(2, 6).toInt()
+          : 2,
+      needsFamilyAssist: json['needsFamilyAssist'] == true,
+      rememberChoices: json['rememberChoices'] != false,
+      createdAt: createdRaw is String ? DateTime.tryParse(createdRaw) : null,
     );
   }
 }
@@ -161,9 +295,11 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
   late final LocationRecommendationController _locationController;
   late final CompanionAgentController _companionAgent;
   bool _locationInitialized = false;
+  bool _localDataLoaded = false;
   bool _personalizedLearningEnabled = true;
   bool _autoStuckDetectionEnabled = false;
   ExpressionPreference _expressionPreference = const ExpressionPreference();
+  SupportProfile _supportProfile = const SupportProfile();
   List<String> _recentExpressions = const [];
   List<String> _favoriteExpressions = const [];
   List<ExpressionHabit> _expressionHabits = const [];
@@ -217,6 +353,7 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
     final recent = await _store.loadRecentExpressions();
     final favorites = await _store.loadFavoriteExpressions();
     final expressionPreference = await _store.loadExpressionPreference();
+    final supportProfile = await _store.loadSupportProfile();
     final autoStuckDetectionEnabled =
         await _store.loadAutoStuckDetectionEnabled();
     final personalizedLearningEnabled = await _habitStore.loadEnabled();
@@ -283,10 +420,12 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
       _personalizedLearningEnabled = personalizedLearningEnabled;
       _autoStuckDetectionEnabled = autoStuckDetectionEnabled;
       _expressionPreference = expressionPreference;
+      _supportProfile = supportProfile;
       _expressionHabits = habits;
       _vocabularyEntries = synchronizedVocabulary;
       _personalObjects = personalObjects;
       _conversationTerms = conversationTerms;
+      _localDataLoaded = true;
     });
   }
 
@@ -382,6 +521,82 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
     setState(() => _expressionPreference = preference);
   }
 
+  Future<List<String>> _seedSupportProfileFavorites(
+    SupportProfile profile,
+  ) async {
+    final phrases = <String>{
+      if (profile.scenes.contains('家里')) ...[
+        '我想喝水',
+        '我想休息',
+        '请帮我拿一下',
+      ],
+      if (profile.scenes.contains('医院')) ...[
+        '我想问医生',
+        '我不舒服',
+        '请帮我叫护士',
+      ],
+      if (profile.scenes.contains('康复训练')) ...[
+        '我想慢一点',
+        '我需要休息一下',
+        '请再示范一次',
+      ],
+      if (profile.scenes.contains('超市')) ...[
+        '我要买这个',
+        '这个多少钱',
+        '请帮我结账',
+      ],
+      if (profile.scenes.contains('电话')) ...[
+        '请说慢一点',
+        '我听不太清楚',
+        '请再说一遍',
+      ],
+      if (profile.scenes.contains('社交')) ...[
+        '谢谢你',
+        '我想和你聊聊',
+        '请等我一下',
+      ],
+      if (profile.scenes.contains('出门交通')) ...[
+        '我要回家',
+        '请带我去这里',
+        '我需要帮助',
+      ],
+      if (profile.scenes.contains('紧急求助')) ...[
+        '请帮帮我',
+        '请联系我的家人',
+        '我需要医生',
+      ],
+    };
+    for (final phrase in phrases.take(8)) {
+      await _store.addFavoriteExpression(phrase);
+    }
+    return _store.loadFavoriteExpressions();
+  }
+
+  Future<void> _completeSupportProfile(SupportProfile profile) async {
+    final completedProfile = profile.copyWith(
+      completed: true,
+      createdAt: DateTime.now(),
+    );
+    final preference = completedProfile.toExpressionPreference();
+    await _store.saveSupportProfile(completedProfile);
+    await _store.saveExpressionPreference(preference);
+    await _habitStore.setEnabled(completedProfile.rememberChoices);
+    final updatedFavorites =
+        await _seedSupportProfileFavorites(completedProfile);
+    _locationController.updateFavoriteWords(updatedFavorites);
+    _syncCompanionMemory(
+      favoriteExpressions: updatedFavorites,
+      learningEnabled: completedProfile.rememberChoices,
+    );
+    if (!mounted) return;
+    setState(() {
+      _supportProfile = completedProfile;
+      _expressionPreference = preference;
+      _personalizedLearningEnabled = completedProfile.rememberChoices;
+      _favoriteExpressions = updatedFavorites;
+    });
+  }
+
   Future<void> _clearExpressionHabits() async {
     await _habitStore.clearAll();
     await _userLearningStore.clear();
@@ -420,29 +635,562 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
             ),
           );
         },
-        home: HomePage(
-          qwenService: _qwenService,
-          locationController: _locationController,
-          companionAgent: _companionAgent,
-          personalizedLearningEnabled: _personalizedLearningEnabled,
-          autoStuckDetectionEnabled: _autoStuckDetectionEnabled,
-          expressionPreference: _expressionPreference,
-          recentExpressions: _recentExpressions,
-          favoriteExpressions: _favoriteExpressions,
-          expressionHabits: _expressionHabits,
-          vocabularyEntries: _vocabularyEntries,
-          personalObjects: _personalObjects,
-          personalObjectStore: _personalObjectStore,
-          onExpressionCompleted: _recordExpression,
-          onFavoriteSaved: _saveFavorite,
-          onHabitRecorded: _recordHabit,
-          onPersonalizedLearningChanged: _setPersonalizedLearningEnabled,
-          onAutoStuckDetectionChanged: _setAutoStuckDetectionEnabled,
-          onExpressionPreferenceChanged: _saveExpressionPreference,
-          onClearPersonalizedLearningData: _clearExpressionHabits,
-          onVocabularyChanged: _saveVocabulary,
-          onPersonalObjectsChanged: _loadLocalData,
+        home: !_localDataLoaded
+            ? const _YuqiaoLoadingPage()
+            : !_supportProfile.completed
+                ? SupportProfileSetupPage(
+                    initialProfile: _supportProfile,
+                    onCompleted: _completeSupportProfile,
+                  )
+                : HomePage(
+                    qwenService: _qwenService,
+                    locationController: _locationController,
+                    companionAgent: _companionAgent,
+                    personalizedLearningEnabled: _personalizedLearningEnabled,
+                    autoStuckDetectionEnabled: _autoStuckDetectionEnabled,
+                    expressionPreference: _expressionPreference,
+                    recentExpressions: _recentExpressions,
+                    favoriteExpressions: _favoriteExpressions,
+                    expressionHabits: _expressionHabits,
+                    vocabularyEntries: _vocabularyEntries,
+                    personalObjects: _personalObjects,
+                    personalObjectStore: _personalObjectStore,
+                    onExpressionCompleted: _recordExpression,
+                    onFavoriteSaved: _saveFavorite,
+                    onHabitRecorded: _recordHabit,
+                    onPersonalizedLearningChanged:
+                        _setPersonalizedLearningEnabled,
+                    onAutoStuckDetectionChanged: _setAutoStuckDetectionEnabled,
+                    onExpressionPreferenceChanged: _saveExpressionPreference,
+                    onClearPersonalizedLearningData: _clearExpressionHabits,
+                    onVocabularyChanged: _saveVocabulary,
+                    onPersonalObjectsChanged: _loadLocalData,
+                  ),
+      ),
+    );
+  }
+}
+
+class _YuqiaoLoadingPage extends StatelessWidget {
+  const _YuqiaoLoadingPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Color(0xFFF7F2EA),
+      body: Center(
+        child: CircularProgressIndicator(color: Color(0xFF5F8DF7)),
+      ),
+    );
+  }
+}
+
+class SupportProfileSetupPage extends StatefulWidget {
+  const SupportProfileSetupPage({
+    super.key,
+    required this.initialProfile,
+    required this.onCompleted,
+  });
+
+  final SupportProfile initialProfile;
+  final Future<void> Function(SupportProfile profile) onCompleted;
+
+  @override
+  State<SupportProfileSetupPage> createState() =>
+      _SupportProfileSetupPageState();
+}
+
+class _SupportProfileSetupPageState extends State<SupportProfileSetupPage> {
+  static const List<String> _difficultyOptions = [
+    '找词',
+    '听懂别人',
+    '看字写字',
+    '发音',
+    '手部操作',
+    '不确定',
+  ];
+  static const List<String> _sceneOptions = [
+    '家里',
+    '医院',
+    '康复训练',
+    '超市',
+    '电话',
+    '社交',
+    '出门交通',
+    '紧急求助',
+  ];
+  static const List<String> _cueOptions = [
+    '图片',
+    '文字',
+    '语音',
+    '拼音',
+    '手写',
+    '大按钮',
+  ];
+
+  late SupportProfile _profile;
+  int _step = 0;
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _profile = widget.initialProfile;
+  }
+
+  void _toggleListValue(
+    List<String> current,
+    String value,
+    ValueChanged<List<String>> update,
+  ) {
+    final updated = current.contains(value)
+        ? current.where((item) => item != value).toList()
+        : [...current, value];
+    update(updated.isEmpty ? [value] : updated);
+  }
+
+  void _next() {
+    if (_step < 4) {
+      setState(() => _step += 1);
+      return;
+    }
+    _complete();
+  }
+
+  Future<void> _complete() async {
+    if (_isSaving) return;
+    setState(() => _isSaving = true);
+    await widget.onCompleted(_profile);
+    if (mounted) setState(() => _isSaving = false);
+  }
+
+  String get _stepTitle => switch (_step) {
+        0 => '你现在最需要帮助的是？',
+        1 => '最常在哪些地方使用？',
+        2 => '哪种提示更容易看懂？',
+        3 => '每次表达给多少选择？',
+        _ => '语桥会这样适应你',
+      };
+
+  String get _stepSubtitle => switch (_step) {
+        0 => '可以多选，不需要判断类型，只告诉语桥哪里最费劲。',
+        1 => '这些场景会影响常用表达和候选内容。',
+        2 => '后续候选卡片会按这个偏好调整图像、文字和点击区域。',
+        3 => '少一点更轻松，多一点选择更充分。',
+        _ => '完成后仍然可以在设置里修改表达偏好。',
+      };
+
+  Widget _buildMultiChoiceStep({
+    required List<String> options,
+    required List<String> selected,
+    required ValueChanged<List<String>> onChanged,
+  }) {
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: [
+        for (final option in options)
+          _SupportProfileChip(
+            label: option,
+            selected: selected.contains(option),
+            onTap: () => setState(() {
+              _toggleListValue(selected, option, onChanged);
+            }),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildCandidateStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '候选数量',
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFF2C2D31),
+          ),
         ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            for (final count in const [2, 4, 6]) ...[
+              _ChoicePill(
+                label: '$count 个',
+                selected: _profile.candidateCount == count,
+                onTap: () => setState(() {
+                  _profile = _profile.copyWith(candidateCount: count);
+                }),
+              ),
+              if (count != 6) const SizedBox(width: 10),
+            ],
+          ],
+        ),
+        const SizedBox(height: 22),
+        const Text(
+          '每次训练多久',
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFF2C2D31),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            for (final minutes in const [3, 5, 10]) ...[
+              _ChoicePill(
+                label: '$minutes 分钟',
+                selected: _profile.trainingMinutes == minutes,
+                onTap: () => setState(() {
+                  _profile = _profile.copyWith(trainingMinutes: minutes);
+                }),
+              ),
+              if (minutes != 10) const SizedBox(width: 10),
+            ],
+          ],
+        ),
+        const SizedBox(height: 22),
+        _SupportSwitchTile(
+          title: '需要家属协助配置',
+          subtitle: '之后可以请家属帮忙添加常用词和个人物品',
+          value: _profile.needsFamilyAssist,
+          onChanged: (value) => setState(() {
+            _profile = _profile.copyWith(needsFamilyAssist: value);
+          }),
+        ),
+      ],
+    );
+  }
+
+  List<String> _adaptationLines() {
+    final preference = _profile.toExpressionPreference();
+    return [
+      '默认每次显示 ${preference.effectiveCandidateCount} 个候选',
+      switch (preference.displayMode) {
+        'imageFirst' => '候选会优先显示更大的图标',
+        'largeText' => '候选会优先显示更醒目的文字',
+        _ => '候选会保持图文平衡',
+      },
+      switch (preference.effectiveImageScale) {
+        >= 1.45 => '点击区域和图标会明显放大',
+        >= 1.2 => '图标会比默认更大',
+        _ => '图标保持标准大小',
+      },
+      '训练节奏默认 ${_profile.trainingMinutes} 分钟',
+      _profile.needsFamilyAssist ? '保留家属协助入口' : '先使用个人轻量配置',
+    ];
+  }
+
+  Widget _buildSummaryStep() {
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: const Color(0xFFEAF1FF),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.8)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '完成后，界面会马上变化',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF26282D),
+                ),
+              ),
+              const SizedBox(height: 12),
+              for (final line in _adaptationLines()) ...[
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.check_circle_rounded,
+                      size: 20,
+                      color: Color(0xFF5F8DF7),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        line,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          height: 1.35,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF4A4B50),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _SupportSwitchTile(
+          title: '允许语桥记住我的选择',
+          subtitle: '开启后，系统会学习常用表达；关闭则只保留本次基础设置',
+          value: _profile.rememberChoices,
+          onChanged: (value) => setState(() {
+            _profile = _profile.copyWith(rememberChoices: value);
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStepBody() {
+    return switch (_step) {
+      0 => _buildMultiChoiceStep(
+          options: _difficultyOptions,
+          selected: _profile.difficulties,
+          onChanged: (items) =>
+              _profile = _profile.copyWith(difficulties: items),
+        ),
+      1 => _buildMultiChoiceStep(
+          options: _sceneOptions,
+          selected: _profile.scenes,
+          onChanged: (items) => _profile = _profile.copyWith(scenes: items),
+        ),
+      2 => _buildMultiChoiceStep(
+          options: _cueOptions,
+          selected: _profile.cuePreferences,
+          onChanged: (items) =>
+              _profile = _profile.copyWith(cuePreferences: items),
+        ),
+      3 => _buildCandidateStep(),
+      _ => _buildSummaryStep(),
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = (_step + 1) / 5;
+    return Scaffold(
+      backgroundColor: const Color(0xFFF7F2EA),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(22, 16, 22, 26),
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 58,
+                  height: 58,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFE2C8),
+                    borderRadius: BorderRadius.circular(22),
+                  ),
+                  child: const Icon(
+                    Icons.auto_awesome_rounded,
+                    color: Color(0xFF26282D),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                const Expanded(
+                  child: Text(
+                    '表达支持档案',
+                    style: TextStyle(
+                      fontSize: 30,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF26282D),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 8,
+                backgroundColor: Colors.white.withValues(alpha: 0.65),
+                color: const Color(0xFF5F8DF7),
+              ),
+            ),
+            const SizedBox(height: 22),
+            _PreferenceCard(
+              title: _stepTitle,
+              subtitle: _stepSubtitle,
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                child: KeyedSubtree(
+                  key: ValueKey<int>(_step),
+                  child: _buildStepBody(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 22),
+            Row(
+              children: [
+                if (_step > 0)
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed:
+                          _isSaving ? null : () => setState(() => _step -= 1),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size.fromHeight(56),
+                        foregroundColor: const Color(0xFF4A4B50),
+                        side: BorderSide(
+                          color: Colors.white.withValues(alpha: 0.9),
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                      ),
+                      child: const Text(
+                        '上一步',
+                        style: TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                  ),
+                if (_step > 0) const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: ElevatedButton(
+                    onPressed: _isSaving ? null : _next,
+                    style: ElevatedButton.styleFrom(
+                      elevation: 0,
+                      minimumSize: const Size.fromHeight(56),
+                      backgroundColor: const Color(0xFF5F8DF7),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                    ),
+                    child: Text(
+                      _isSaving ? '正在保存' : (_step == 4 ? '开始使用语桥' : '下一步'),
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SupportProfileChip extends StatelessWidget {
+  const _SupportProfileChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFF5F8DF7) : const Color(0xFFF7F5F1),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected
+                ? const Color(0xFF5F8DF7)
+                : Colors.white.withValues(alpha: 0.78),
+          ),
+          boxShadow: selected
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFF5F8DF7).withValues(alpha: 0.18),
+                    blurRadius: 16,
+                    offset: const Offset(0, 8),
+                  ),
+                ]
+              : null,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w900,
+            color: selected ? Colors.white : const Color(0xFF4A4B50),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SupportSwitchTile extends StatelessWidget {
+  const _SupportSwitchTile({
+    required this.title,
+    required this.subtitle,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F5F1),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.72)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF2C2D31),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    height: 1.35,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF8A8782),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: value,
+            activeThumbColor: const Color(0xFF5F8DF7),
+            onChanged: onChanged,
+          ),
+        ],
       ),
     );
   }
@@ -525,6 +1273,7 @@ class HomePage extends StatelessWidget {
               expressionHabits: expressionHabits,
               preferredCandidateCount:
                   expressionPreference.effectiveCandidateCount,
+              candidateImageScale: expressionPreference.effectiveImageScale,
               featureLauncher: _featureLauncher,
               onHabitRecorded: onHabitRecorded,
               onExpressionCompleted: (text) async {
@@ -569,6 +1318,7 @@ class HomePage extends StatelessWidget {
               favoriteExpressions: favoriteExpressions,
               expressionHabits: expressionHabits,
               vocabularyEntries: vocabularyEntries,
+              candidateImageScale: expressionPreference.effectiveImageScale,
               featureLauncher: _featureLauncher,
               onHabitRecorded: onHabitRecorded,
               onExpressionCompleted: (text) async {
@@ -704,6 +1454,7 @@ class HomePage extends StatelessWidget {
       onClearPlaceData: locationController.clearPlaceData,
       locationController: locationController, // TODO: 调试用，以后删除
       onFavoriteSaved: onFavoriteSaved,
+      onStarPhraseSpoken: onExpressionCompleted,
       onOpenYuqiaoMemory: () => _openYuqiaoMemory(context),
       onOpenPersonalObjects: () => _openPersonalObjects(context),
       onStuck: () {
@@ -719,6 +1470,7 @@ class HomePage extends StatelessWidget {
               expressionHabits: expressionHabits,
               preferredCandidateCount:
                   expressionPreference.effectiveCandidateCount,
+              candidateImageScale: expressionPreference.effectiveImageScale,
               featureLauncher: _featureLauncher,
               onHabitRecorded: onHabitRecorded,
               onExpressionCompleted: (text) async {
@@ -747,6 +1499,7 @@ class HomePage extends StatelessWidget {
               favoriteExpressions: favoriteExpressions,
               expressionHabits: expressionHabits,
               vocabularyEntries: vocabularyEntries,
+              candidateImageScale: expressionPreference.effectiveImageScale,
               featureLauncher: _featureLauncher,
               onHabitRecorded: onHabitRecorded,
               onExpressionCompleted: (text) async {
@@ -1179,12 +1932,14 @@ class ExpressionPreferencePage extends StatefulWidget {
 class _ExpressionPreferencePageState extends State<ExpressionPreferencePage> {
   late int _candidateCount;
   late String _displayMode;
+  late double _imageScale;
 
   @override
   void initState() {
     super.initState();
     _candidateCount = widget.initialPreference.effectiveCandidateCount;
     _displayMode = widget.initialPreference.displayMode;
+    _imageScale = widget.initialPreference.effectiveImageScale;
   }
 
   void _save() {
@@ -1192,6 +1947,7 @@ class _ExpressionPreferencePageState extends State<ExpressionPreferencePage> {
       ExpressionPreference(
         preferredCandidateCount: _candidateCount,
         displayMode: _displayMode,
+        imageScale: _imageScale,
       ),
     );
   }
@@ -1225,7 +1981,7 @@ class _ExpressionPreferencePageState extends State<ExpressionPreferencePage> {
             ),
             const SizedBox(height: 10),
             const Text(
-              '设置补词时每一组显示多少个候选，以及界面更偏向哪种呈现方式。',
+              '设置补词时每一组显示多少个候选，以及候选卡片中文字和图像的呈现方式。',
               style: TextStyle(
                 fontSize: 16,
                 height: 1.45,
@@ -1261,8 +2017,70 @@ class _ExpressionPreferencePageState extends State<ExpressionPreferencePage> {
             ),
             const SizedBox(height: 16),
             _PreferenceCard(
+              title: '图片大小',
+              subtitle: '调大后，补词和对话候选里的图标会占据更多空间',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 44 * _imageScale,
+                        height: 44 * _imageScale,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFFFE2C8),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.touch_app_rounded,
+                          size: 26 * _imageScale,
+                          color: Color(0xFF26282D),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text(
+                          switch (_imageScale) {
+                            <= 0.9 => '小图标',
+                            >= 1.45 => '特大图标',
+                            >= 1.2 => '大图标',
+                            _ => '标准图标',
+                          },
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFF26282D),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      activeTrackColor: const Color(0xFF5F8DF7),
+                      inactiveTrackColor: const Color(0xFFDADCE3),
+                      thumbColor: const Color(0xFF5F8DF7),
+                      overlayColor:
+                          const Color(0xFF5F8DF7).withValues(alpha: 0.12),
+                    ),
+                    child: Slider(
+                      value: _imageScale,
+                      min: 0.85,
+                      max: 1.55,
+                      divisions: 7,
+                      onChanged: (value) => setState(() {
+                        _imageScale = double.parse(value.toStringAsFixed(2));
+                      }),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            _PreferenceCard(
               title: '显示方式',
-              subtitle: '第一版先记录偏好，后续会继续影响更多页面',
+              subtitle: '影响候选卡片里文字和图像的侧重',
               child: Column(
                 children: [
                   _ModeRow(
@@ -4339,6 +5157,7 @@ class ConversationModePage extends StatefulWidget {
     required this.favoriteExpressions,
     required this.expressionHabits,
     required this.vocabularyEntries,
+    this.candidateImageScale = 1.0,
     required this.onHabitRecorded,
     required this.onExpressionCompleted,
     required this.onFavoriteSaved,
@@ -4353,6 +5172,7 @@ class ConversationModePage extends StatefulWidget {
   final List<String> favoriteExpressions;
   final List<ExpressionHabit> expressionHabits;
   final List<VocabularyEntry> vocabularyEntries;
+  final double candidateImageScale;
   final HabitRecordCallback onHabitRecorded;
   final ExpressionCallback onExpressionCompleted;
   final ExpressionCallback onFavoriteSaved;
@@ -5932,15 +6752,24 @@ class _ConversationModePageState extends State<ConversationModePage>
                                               const NeverScrollableScrollPhysics(),
                                           itemCount: suggestions.take(4).length,
                                           gridDelegate:
-                                              const SliverGridDelegateWithFixedCrossAxisCount(
+                                              SliverGridDelegateWithFixedCrossAxisCount(
                                             crossAxisCount: 2,
                                             crossAxisSpacing: 14,
                                             mainAxisSpacing: 14,
-                                            childAspectRatio: 1.1,
+                                            childAspectRatio:
+                                                widget.candidateImageScale >=
+                                                        1.25
+                                                    ? 0.9
+                                                    : 1.1,
                                           ),
                                           itemBuilder: (context, index) {
                                             return CandidateCard(
                                               text: suggestions[index],
+                                              icon: _candidateIconForText(
+                                                suggestions[index],
+                                              ),
+                                              imageScale:
+                                                  widget.candidateImageScale,
                                               styleIndex: index,
                                               onTap: () {
                                                 Navigator.of(dialogContext)
@@ -8053,6 +8882,7 @@ class StuckFlowPage extends StatefulWidget {
     required this.vocabularyEntries,
     required this.expressionHabits,
     this.preferredCandidateCount = 4,
+    this.candidateImageScale = 1.0,
     required this.featureLauncher,
     required this.onHabitRecorded,
     required this.onExpressionCompleted,
@@ -8066,6 +8896,7 @@ class StuckFlowPage extends StatefulWidget {
   final List<VocabularyEntry> vocabularyEntries;
   final List<ExpressionHabit> expressionHabits;
   final int preferredCandidateCount;
+  final double candidateImageScale;
   final YuqiaoFeatureLauncher featureLauncher;
   final HabitRecordCallback onHabitRecorded;
   final ExpressionCallback onExpressionCompleted;
@@ -9067,6 +9898,7 @@ class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
                           )
                         : _StuckCandidateGrid(
                             candidates: _visibleCandidates,
+                            imageScale: widget.candidateImageScale,
                             onSelected: _chooseCandidate,
                           ),
                   if (step != null && !_isRecommending) ...[
@@ -9283,32 +10115,42 @@ class _StuckCandidateGrid extends StatelessWidget {
   const _StuckCandidateGrid({
     super.key,
     required this.candidates,
+    required this.imageScale,
     required this.onSelected,
   });
 
   final List<StuckCandidate> candidates;
+  final double imageScale;
   final ValueChanged<StuckCandidate> onSelected;
 
   @override
   Widget build(BuildContext context) {
+    final effectiveScale = imageScale.clamp(0.85, 1.55).toDouble();
     return GridView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       itemCount: candidates.length,
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 2,
         crossAxisSpacing: AppSpacing.gap,
         mainAxisSpacing: AppSpacing.gap,
-        childAspectRatio: 1.28,
+        childAspectRatio: effectiveScale >= 1.25 ? 0.95 : 1.2,
       ),
       itemBuilder: (context, index) {
         final candidate = candidates[index];
         final style = _candidateCardStyles[index % _candidateCardStyles.length];
+        final iconDiameter = (44 * effectiveScale).clamp(38.0, 70.0);
+        final iconSize = (26 * effectiveScale).clamp(22.0, 42.0);
+        final cardPadding = effectiveScale >= 1.3
+            ? 12.0
+            : effectiveScale >= 1.15
+                ? 14.0
+                : 16.0;
         return InkWell(
           borderRadius: BorderRadius.circular(28),
           onTap: () => onSelected(candidate),
           child: Container(
-            padding: const EdgeInsets.all(16),
+            padding: EdgeInsets.all(cardPadding),
             decoration: BoxDecoration(
               color: style.background,
               borderRadius: BorderRadius.circular(28),
@@ -9327,27 +10169,35 @@ class _StuckCandidateGrid extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  candidate.semanticGroup,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textSecondary.withValues(alpha: 0.82),
+                Container(
+                  width: iconDiameter,
+                  height: iconDiameter,
+                  decoration: BoxDecoration(
+                    color: style.iconBackground.withValues(alpha: 0.88),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    _candidateIconForText(
+                      candidate.text,
+                      semanticGroup: candidate.semanticGroup,
+                    ),
+                    size: iconSize,
+                    color: const Color(0xFF151515),
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  candidate.text,
-                  textAlign: TextAlign.center,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    height: 1.2,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.textPrimary,
+                SizedBox(height: 10 + (effectiveScale - 1) * 4),
+                Flexible(
+                  child: Text(
+                    candidate.text,
+                    textAlign: TextAlign.center,
+                    maxLines: effectiveScale >= 1.3 ? 2 : 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 20,
+                      height: 1.2,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.textPrimary,
+                    ),
                   ),
                 ),
               ],
@@ -15059,6 +15909,7 @@ class LocalStore implements LocationDataStore {
   static const String _vocabularyKey = 'vocabulary_entries';
   static const String _vocabularySeedVersionKey = 'vocabulary_seed_version';
   static const String _expressionPreferenceKey = 'expression_preference_v2';
+  static const String _supportProfileKey = 'support_profile_v1';
   static const String _autoStuckDetectionKey = 'auto_stuck_detection_enabled';
   static const String _locationEnabledKey = 'location_recommendation_enabled';
   static const String _locationDataKey = 'location_recommendation_data';
@@ -15145,6 +15996,26 @@ class LocalStore implements LocationDataStore {
       _expressionPreferenceKey,
       jsonEncode(preference.toJson()),
     );
+  }
+
+  Future<SupportProfile> loadSupportProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_supportProfileKey);
+    if (raw == null || raw.isEmpty) return const SupportProfile();
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        return SupportProfile.fromJson(decoded);
+      }
+    } catch (_) {
+      return const SupportProfile();
+    }
+    return const SupportProfile();
+  }
+
+  Future<void> saveSupportProfile(SupportProfile profile) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_supportProfileKey, jsonEncode(profile.toJson()));
   }
 
   Future<bool> loadAutoStuckDetectionEnabled() async {
@@ -15887,6 +16758,7 @@ class CandidateGrid extends StatelessWidget {
         return CandidateCard(
           text: options[index],
           icon: icons == null ? null : icons![index],
+          imageScale: 1.0,
           styleIndex: index,
           onTap: () => onSelected(options[index]),
         );
@@ -15940,30 +16812,78 @@ const List<_CandidateCardStyle> _candidateCardStyles = [
   ),
 ];
 
+IconData _candidateIconForText(String text, {String? semanticGroup}) {
+  final normalized = '${semanticGroup ?? ''} $text'.toLowerCase();
+  bool hasAny(List<String> tokens) =>
+      tokens.any((token) => normalized.contains(token));
+
+  if (hasAny(['疼', '痛', '不舒服', '医院', '医生', '药', '发烧', '咳'])) {
+    return Icons.health_and_safety_rounded;
+  }
+  if (hasAny(['吃', '喝', '水', '饭', '饿', '渴', '餐', '菜'])) {
+    return Icons.restaurant_rounded;
+  }
+  if (hasAny(['厕所', '洗手间', '卫生间', '上厕所'])) {
+    return Icons.wc_rounded;
+  }
+  if (hasAny(['回家', '出去', '路', '车', '公交', '地铁', '位置', '带我'])) {
+    return Icons.place_rounded;
+  }
+  if (hasAny(['帮', '拿', '开', '关', '递', '扶', '需要'])) {
+    return Icons.volunteer_activism_rounded;
+  }
+  if (hasAny(['冷', '热', '衣', '空调', '被子', '灯'])) {
+    return Icons.thermostat_rounded;
+  }
+  if (hasAny(['谢谢', '你好', '再见', '对不起', '请', '可以吗'])) {
+    return Icons.chat_bubble_rounded;
+  }
+  if (hasAny(['时间', '几点', '今天', '明天', '等一下'])) {
+    return Icons.schedule_rounded;
+  }
+  if (hasAny(['难过', '开心', '害怕', '生气', '想', '喜欢', '不喜欢'])) {
+    return Icons.favorite_rounded;
+  }
+  if (hasAny(['钱', '买', '付款', '价格', '多少'])) {
+    return Icons.payments_rounded;
+  }
+  return Icons.touch_app_rounded;
+}
+
 class CandidateCard extends StatelessWidget {
   const CandidateCard({
     super.key,
     required this.text,
     required this.onTap,
     this.icon,
+    this.imageScale = 1.0,
     this.styleIndex = 0,
   });
 
   final String text;
   final VoidCallback onTap;
   final IconData? icon;
+  final double imageScale;
   final int styleIndex;
 
   @override
   Widget build(BuildContext context) {
     final style =
         _candidateCardStyles[styleIndex % _candidateCardStyles.length];
+    final effectiveScale = imageScale.clamp(0.85, 1.55).toDouble();
+    final iconDiameter = (42 * effectiveScale).clamp(36.0, 68.0);
+    final iconSize = (25 * effectiveScale).clamp(21.0, 41.0);
+    final cardPadding = effectiveScale >= 1.3
+        ? 12.0
+        : effectiveScale >= 1.15
+            ? 14.0
+            : 18.0;
 
     return InkWell(
       borderRadius: BorderRadius.circular(AppRadius.card),
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.all(18),
+        padding: EdgeInsets.all(cardPadding),
         decoration: BoxDecoration(
           color: style.background,
           borderRadius: BorderRadius.circular(28),
@@ -15984,20 +16904,26 @@ class CandidateCard extends StatelessWidget {
           children: [
             if (icon != null) ...[
               Container(
-                width: 42,
-                height: 42,
+                width: iconDiameter,
+                height: iconDiameter,
                 decoration: BoxDecoration(
                   color: style.iconBackground.withValues(alpha: 0.88),
                   shape: BoxShape.circle,
                 ),
-                child: Icon(icon, size: 25, color: const Color(0xFF111111)),
+                child: Icon(
+                  icon,
+                  size: iconSize,
+                  color: const Color(0xFF111111),
+                ),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: 10 + (effectiveScale - 1) * 4),
             ],
             Flexible(
               child: Text(
                 text,
                 textAlign: TextAlign.center,
+                maxLines: effectiveScale >= 1.3 ? 2 : 3,
+                overflow: TextOverflow.ellipsis,
                 style: AppTextStyles.candidate.copyWith(
                   color: const Color(0xFF151515),
                   fontWeight: FontWeight.w800,

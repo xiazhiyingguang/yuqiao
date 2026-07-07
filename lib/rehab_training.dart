@@ -267,7 +267,7 @@ class RehabTrainingWord {
 
 enum RehabTrainingWordSource { symbol, personalObject }
 
-enum RehabTrainingMode { mixed, weakReview, personalObjects }
+enum RehabTrainingMode { mixed, weakReview, personalObjects, listening }
 
 enum RehabTrainingDifficulty { easy, standard, hard }
 
@@ -289,10 +289,16 @@ class RehabTrainingQuestion {
   const RehabTrainingQuestion({
     required this.answer,
     required this.options,
+    this.listeningSentence,
+    this.listeningInstruction,
   });
 
   final RehabTrainingWord answer;
   final List<RehabTrainingWord> options;
+  final String? listeningSentence;
+  final String? listeningInstruction;
+
+  bool get isListening => listeningSentence?.trim().isNotEmpty == true;
 }
 
 class RehabTrainingDeck {
@@ -343,6 +349,9 @@ class RehabTrainingDeck {
     RehabTrainingMode mode = RehabTrainingMode.mixed,
     RehabTrainingDifficulty difficulty = RehabTrainingDifficulty.standard,
   }) {
+    if (mode == RehabTrainingMode.listening) {
+      return _buildListeningQuestion(words: words, seed: seed);
+    }
     final rng = math.Random(seed);
     final ranked = List<RehabTrainingWord>.of(words)
       ..sort((a, b) {
@@ -376,6 +385,7 @@ class RehabTrainingDeck {
     return switch (mode) {
       RehabTrainingMode.personalObjects =>
         ranked.where((word) => word.isPersonalObject).toList(),
+      RehabTrainingMode.listening => ranked,
       RehabTrainingMode.weakReview => ranked.where((word) {
           final item = progress[MulberrySymbolResolver.normalize(word.text)];
           return item != null && (item.isWeakWord || item.isDueForReview);
@@ -452,6 +462,7 @@ class RehabTrainingDeck {
   }) {
     final modeBoost = switch (mode) {
       RehabTrainingMode.personalObjects => word.isPersonalObject ? 1200.0 : 0.0,
+      RehabTrainingMode.listening => word.isPersonalObject ? 420.0 : 0.0,
       RehabTrainingMode.weakReview => 0.0,
       RehabTrainingMode.mixed => 0.0,
     };
@@ -509,6 +520,299 @@ class RehabTrainingDeck {
   static String _assetFamily(String asset) {
     final file = asset.split('/').last.split('.').first;
     return file.split(RegExp(r'[_,-]')).first;
+  }
+
+  static RehabTrainingQuestion _buildListeningQuestion({
+    required List<RehabTrainingWord> words,
+    required int seed,
+  }) {
+    final rng = math.Random(seed);
+    final type = rng.nextInt(5);
+    return switch (type) {
+      0 || 1 => _buildObjectListeningQuestion(words, rng),
+      2 => _buildActionListeningQuestion(words, rng),
+      3 => _buildPlaceListeningQuestion(words, rng),
+      _ => _buildSequenceListeningQuestion(words, rng),
+    };
+  }
+
+  static RehabTrainingQuestion _buildObjectListeningQuestion(
+    List<RehabTrainingWord> words,
+    math.Random rng,
+  ) {
+    final pool = _wordsForCategories(
+      words,
+      {'个人物品', '物品', '饮食', '医疗'},
+      fallbackTexts: const ['水杯', '药', '手机', '钥匙', '眼镜', '钱包', '毛巾', '外套'],
+    )..sort((a, b) {
+        if (a.isPersonalObject != b.isPersonalObject) {
+          return a.isPersonalObject ? -1 : 1;
+        }
+        return a.text.compareTo(b.text);
+      });
+    final answer = pool[rng.nextInt(math.min(pool.length, 8))];
+    final sentence = _objectSentenceFor(answer.text, rng);
+    return RehabTrainingQuestion(
+      answer: answer,
+      options: _listeningOptions(
+        answer,
+        pool,
+        rng,
+        categoryAware: true,
+      ),
+      listeningSentence: sentence,
+      listeningInstruction: '听一句生活话，选择听到的物品',
+    );
+  }
+
+  static RehabTrainingQuestion _buildActionListeningQuestion(
+    List<RehabTrainingWord> words,
+    math.Random rng,
+  ) {
+    final pool = _actionWords(words);
+    final answer = pool[rng.nextInt(pool.length)];
+    final sentence = switch (answer.text) {
+      '喝水' => '请喝一点水',
+      '吃药' => '现在吃药',
+      '坐下' => '请坐下',
+      '休息' => '休息一下',
+      '开门' => '请开门',
+      '关门' => '请关门',
+      '打电话' => '给家人打电话',
+      '回家' => '我们回家',
+      '等一下' => '请等一下',
+      '拿东西' => '请拿一下东西',
+      _ => '请${answer.text}',
+    };
+    return RehabTrainingQuestion(
+      answer: answer,
+      options: _listeningOptions(answer, pool, rng, categoryAware: false),
+      listeningSentence: sentence,
+      listeningInstruction: '听一句生活话，选择要做的动作',
+    );
+  }
+
+  static RehabTrainingQuestion _buildPlaceListeningQuestion(
+    List<RehabTrainingWord> words,
+    math.Random rng,
+  ) {
+    final pool = _wordsForCategories(
+      words,
+      {'地点', '医疗', '购物', '交通'},
+      fallbackTexts: const ['家', '医院', '超市', '公园', '厕所', '门口', '公交站', '康复室'],
+    );
+    final answer = pool[rng.nextInt(math.min(pool.length, 8))];
+    final sentence = _placeSentenceFor(answer.text, rng);
+    return RehabTrainingQuestion(
+      answer: answer,
+      options: _listeningOptions(answer, pool, rng, categoryAware: true),
+      listeningSentence: sentence,
+      listeningInstruction: '听一句生活话，选择听到的地点',
+    );
+  }
+
+  static RehabTrainingQuestion _buildSequenceListeningQuestion(
+    List<RehabTrainingWord> words,
+    math.Random rng,
+  ) {
+    final pairs = _sequencePairs();
+    final pair = pairs[rng.nextInt(pairs.length)];
+    final first = pair.$1;
+    final second = pair.$2;
+    final pool = _withFallbackWords(
+      const [],
+      [
+        for (final item in pairs) ...[item.$1, item.$2],
+      ],
+    );
+    final sentence = '先$first，再$second';
+    final answer = RehabTrainingWord(text: first, asset: '', category: '动作');
+    return RehabTrainingQuestion(
+      answer: answer,
+      options: _listeningOptions(answer, pool, rng, categoryAware: false),
+      listeningSentence: sentence,
+      listeningInstruction: '听一句生活话，选择先做的事',
+    );
+  }
+
+  static List<RehabTrainingWord> _wordsForCategories(
+    List<RehabTrainingWord> words,
+    Set<String> categories, {
+    required List<String> fallbackTexts,
+  }) {
+    final selected = words
+        .where((word) => categories.contains(word.category))
+        .toList(growable: false);
+    return _withFallbackWords(selected, fallbackTexts);
+  }
+
+  static List<RehabTrainingWord> _actionWords(List<RehabTrainingWord> words) {
+    const actionTexts = [
+      '喝水',
+      '吃药',
+      '坐下',
+      '休息',
+      '开门',
+      '关门',
+      '打电话',
+      '回家',
+      '等一下',
+      '拿东西',
+    ];
+    final existing = <String, RehabTrainingWord>{
+      for (final word in words)
+        if (actionTexts.contains(word.text)) word.text: word,
+    };
+    return [
+      for (final text in actionTexts)
+        existing[text] ??
+            RehabTrainingWord(
+              text: text,
+              asset: '',
+              category: '动作',
+            ),
+    ];
+  }
+
+  static List<RehabTrainingWord> _withFallbackWords(
+    List<RehabTrainingWord> words,
+    List<String> fallbackTexts,
+  ) {
+    final seen = <String>{};
+    final result = <RehabTrainingWord>[];
+    for (final word in words) {
+      if (seen.add(MulberrySymbolResolver.normalize(word.text))) {
+        result.add(word);
+      }
+    }
+    for (final text in fallbackTexts) {
+      if (seen.add(MulberrySymbolResolver.normalize(text))) {
+        result.add(RehabTrainingWord(
+          text: text,
+          asset: '',
+          category: _trainingCategoryFor(text, '', '生活'),
+        ));
+      }
+    }
+    return result;
+  }
+
+  static List<RehabTrainingWord> _listeningOptions(
+    RehabTrainingWord answer,
+    List<RehabTrainingWord> pool,
+    math.Random rng, {
+    required bool categoryAware,
+  }) {
+    final answerKey = MulberrySymbolResolver.normalize(answer.text);
+    final candidates = pool
+        .where(
+            (word) => MulberrySymbolResolver.normalize(word.text) != answerKey)
+        .toList();
+    if (categoryAware) {
+      candidates.sort((a, b) {
+        final aScore = _listeningDistractorScore(a, answer);
+        final bScore = _listeningDistractorScore(b, answer);
+        final byScore = bScore.compareTo(aScore);
+        if (byScore != 0) return byScore;
+        return a.text.compareTo(b.text);
+      });
+    } else {
+      candidates.shuffle(rng);
+    }
+    final topPool = categoryAware
+        ? candidates.take(math.min(10, candidates.length)).toList()
+        : candidates;
+    final distractors = topPool..shuffle(rng);
+    return [answer, ...distractors.take(3)]..shuffle(rng);
+  }
+
+  static int _listeningDistractorScore(
+    RehabTrainingWord word,
+    RehabTrainingWord answer,
+  ) {
+    var score = 0;
+    if (word.category == answer.category) score += 80;
+    if (_relatedCategories(answer.category).contains(word.category)) {
+      score += 36;
+    }
+    if (word.isPersonalObject == answer.isPersonalObject) score += 14;
+    if (_sharesMeaningClue(answer.text, word.text)) score += 12;
+    return score;
+  }
+
+  static String _objectSentenceFor(String text, math.Random rng) {
+    if (text.contains('水') || text.contains('杯')) {
+      return switch (rng.nextInt(3)) {
+        0 => '请把$text递给我',
+        1 => '我想要$text',
+        _ => '请帮我拿$text',
+      };
+    }
+    if (text.contains('药')) {
+      return switch (rng.nextInt(3)) {
+        0 => '请把$text拿给我',
+        1 => '我现在要$text',
+        _ => '请帮我找$text',
+      };
+    }
+    if (text.contains('手机') || text.contains('电话')) {
+      return switch (rng.nextInt(3)) {
+        0 => '请把$text拿给我',
+        1 => '我要用$text',
+        _ => '请帮我找$text',
+      };
+    }
+    if (text.contains('钥匙') || text.contains('眼镜')) {
+      return switch (rng.nextInt(3)) {
+        0 => '请帮我找$text',
+        1 => '请把$text拿给我',
+        _ => '$text在哪里',
+      };
+    }
+    return switch (rng.nextInt(3)) {
+      0 => '请把$text给我',
+      1 => '我想要$text',
+      _ => '请帮我拿$text',
+    };
+  }
+
+  static String _placeSentenceFor(String text, math.Random rng) {
+    if (text.contains('厕所') || text.contains('卫生间')) {
+      return switch (rng.nextInt(2)) {
+        0 => '我想去$text',
+        _ => '请带我去$text',
+      };
+    }
+    if (text.contains('医院') || text.contains('康复')) {
+      return switch (rng.nextInt(2)) {
+        0 => '我们去$text',
+        _ => '请带我去$text',
+      };
+    }
+    if (text.contains('家')) {
+      return switch (rng.nextInt(2)) {
+        0 => '我想回$text',
+        _ => '我们回$text',
+      };
+    }
+    return switch (rng.nextInt(3)) {
+      0 => '我们去$text',
+      1 => '请带我去$text',
+      _ => '我想去$text',
+    };
+  }
+
+  static List<(String, String)> _sequencePairs() {
+    return const [
+      ('吃药', '喝水'),
+      ('坐下', '休息'),
+      ('穿外套', '出门'),
+      ('洗手', '吃饭'),
+      ('拿手机', '打电话'),
+      ('拿钥匙', '出门'),
+      ('排队', '付款'),
+      ('量血压', '休息'),
+    ];
   }
 
   static String _trainingCategoryFor(
@@ -688,7 +992,7 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
       _difficulty = difficulty;
       _loading = false;
     });
-    _nextQuestion(speak: false);
+    _nextQuestion(speak: _mode == RehabTrainingMode.listening);
   }
 
   void _nextQuestion({bool speak = true}) {
@@ -728,6 +1032,7 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
       RehabTrainingMode.personalObjects =>
         _words.where((word) => word.isPersonalObject).isNotEmpty &&
             _words.length >= 4,
+      RehabTrainingMode.listening => _words.length >= 4,
       RehabTrainingMode.weakReview => _words.any((word) {
             final item = _progress[MulberrySymbolResolver.normalize(word.text)];
             return item != null && (item.isWeakWord || item.isDueForReview);
@@ -740,14 +1045,16 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
         RehabTrainingMode.mixed => '看图、听音、选词，让熟悉的词更容易想起',
         RehabTrainingMode.weakReview => '把容易忘的词再照料一次',
         RehabTrainingMode.personalObjects => '用自己的物品练习，更贴近日常',
+        RehabTrainingMode.listening => '听一句生活话语，抓住物品、动作和顺序',
       };
 
   Future<void> _speakAnswer() async {
-    final answer = _question?.answer.text.trim();
-    if (answer == null || answer.isEmpty) return;
+    final question = _question;
+    final answer = question?.listeningSentence ?? question?.answer.text ?? '';
+    if (answer.trim().isEmpty) return;
     setState(() => _speakerActive = true);
     await _tts.stop();
-    await _tts.speak(answer);
+    await _tts.speak(answer.trim());
     await Future<void>.delayed(const Duration(milliseconds: 360));
     if (!mounted) return;
     setState(() => _speakerActive = false);
@@ -947,6 +1254,11 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
           '还没有个人物品',
           '先在拍照识物或我的物品里保存个人物品，再回来练习。'
         ),
+      RehabTrainingMode.listening => (
+          CupertinoIcons.speaker_2_fill,
+          '可练习词汇不足',
+          '听理解训练需要至少 4 个词语作为选项。'
+        ),
       RehabTrainingMode.mixed => (
           CupertinoIcons.square_grid_2x2_fill,
           '可练习词汇不足',
@@ -996,6 +1308,9 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
   }
 
   Widget _buildQuestionCard(RehabTrainingQuestion question) {
+    if (question.isListening) {
+      return _buildListeningQuestionCard(question);
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final ultraCompact = constraints.maxHeight < 560;
@@ -1095,6 +1410,205 @@ class _RehabTrainingPageState extends State<RehabTrainingPage> {
                       )
                     : Row(
                         key: const ValueKey('result'),
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            _lastCorrect!
+                                ? CupertinoIcons.check_mark_circled_solid
+                                : CupertinoIcons.info_circle_fill,
+                            color: _lastCorrect!
+                                ? const Color(0xFF7A9E9F)
+                                : const Color(0xFFD08C60),
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              _resultTextFor(question),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 17,
+                                color: _lastCorrect!
+                                    ? const Color(0xFF547B7C)
+                                    : const Color(0xFFA96844),
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                height: 54,
+                child: CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  color: const Color(0xFF2E3038),
+                  borderRadius: BorderRadius.circular(20),
+                  onPressed:
+                      _selectedText == null ? null : () => _nextQuestion(),
+                  child: const Text(
+                    '下一题',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildListeningQuestionCard(RehabTrainingQuestion question) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final ultraCompact = constraints.maxHeight < 560;
+        final compact = constraints.maxHeight < 660;
+        final optionHeight = ultraCompact
+            ? 64.0
+            : compact
+                ? 76.0
+                : 88.0;
+        final optionsBlockHeight = optionHeight * 2 + 10;
+        return Container(
+          width: double.infinity,
+          padding: EdgeInsets.fromLTRB(18, ultraCompact ? 12 : 18, 18, 16),
+          decoration: _glassDecoration(),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      question.listeningInstruction ?? '听一句话，选择正确答案',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        height: 1.2,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF2E3038),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  _GlassIconButton(
+                    icon: CupertinoIcons.speaker_2_fill,
+                    onTap: _speakAnswer,
+                    size: 54,
+                    active: _speakerActive,
+                    activeColor: const Color(0xFF4E8FD8),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              GestureDetector(
+                onTap: _speakAnswer,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  width: double.infinity,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: ultraCompact ? 16 : 22,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEAF1FF),
+                    borderRadius: BorderRadius.circular(30),
+                    border:
+                        Border.all(color: Colors.white.withValues(alpha: .78)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF4E8FD8).withValues(alpha: .12),
+                        blurRadius: 22,
+                        offset: const Offset(0, 10),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    children: [
+                      Container(
+                        width: compact ? 76 : 94,
+                        height: compact ? 76 : 94,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: .72),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: .88),
+                          ),
+                        ),
+                        child: const Icon(
+                          CupertinoIcons.speaker_3_fill,
+                          size: 42,
+                          color: Color(0xFF4E8FD8),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        _speakerActive ? '正在播放' : '重听这句话',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                          color: _speakerActive
+                              ? const Color(0xFF2E6FB0)
+                              : const Color(0xFF4E8FD8),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _selectedText == null
+                            ? '慢速播放，可以重复听'
+                            : question.listeningSentence ?? '',
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          height: 1.25,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF2E3038),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                height: optionsBlockHeight,
+                child: GridView.builder(
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: question.options.length,
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 10,
+                    crossAxisSpacing: 12,
+                    mainAxisExtent: optionHeight,
+                  ),
+                  itemBuilder: (context, index) {
+                    final option = question.options[index];
+                    return _OptionButton(
+                      text: option.text,
+                      selectedText: _selectedText,
+                      answerText: question.answer.text,
+                      styleIndex: index,
+                      onTap: () => _choose(option),
+                    );
+                  },
+                ),
+              ),
+              const Spacer(),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                child: _lastCorrect == null
+                    ? const SizedBox(
+                        key: ValueKey('empty-listening-result'),
+                        height: 28,
+                      )
+                    : Row(
+                        key: const ValueKey('listening-result'),
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
