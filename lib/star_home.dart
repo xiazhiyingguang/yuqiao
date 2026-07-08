@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui';
 
@@ -7,11 +8,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'location_recommendation.dart'; // TODO: 璋冭瘯鐢紝浠ュ悗鍒犻櫎
 import 'location_memory_pages.dart';
 import 'my_test.dart' as profile_ui;
 import 'rehab_training.dart';
+
+part 'star_speak_sheet.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -100,51 +104,6 @@ const List<FeatureConfig> kFeatures = [
     label: '词库',
     icon: CupertinoIcons.book_fill,
     color: Color(0xFF909CFF),
-  ),
-];
-
-class StarPhrase {
-  const StarPhrase({
-    required this.text,
-    required this.icon,
-    required this.color,
-  });
-
-  final String text;
-  final IconData icon;
-  final Color color;
-}
-
-const List<StarPhrase> kStarPhrases = [
-  StarPhrase(
-    text: '是',
-    icon: Icons.check_circle_rounded,
-    color: Color(0xFF7A9E9F),
-  ),
-  StarPhrase(
-    text: '不是',
-    icon: Icons.cancel_rounded,
-    color: Color(0xFFD77F8B),
-  ),
-  StarPhrase(
-    text: '请慢一点',
-    icon: Icons.speed_rounded,
-    color: Color(0xFF8D9DC2),
-  ),
-  StarPhrase(
-    text: '请再说一次',
-    icon: Icons.replay_rounded,
-    color: Color(0xFFD7A86E),
-  ),
-  StarPhrase(
-    text: '我想喝水',
-    icon: Icons.local_drink_rounded,
-    color: Color(0xFF4E8FD8),
-  ),
-  StarPhrase(
-    text: '我不舒服',
-    icon: Icons.favorite_rounded,
-    color: Color(0xFFD08C60),
   ),
 ];
 
@@ -407,23 +366,35 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
 
   Future<void> _openStarSpeakBoard() async {
     HapticFeedback.lightImpact();
-    await showModalBottomSheet<void>(
+    await showGeneralDialog<void>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
+      barrierDismissible: true,
+      barrierLabel: '关闭星语',
       barrierColor: Colors.black.withValues(alpha: .22),
-      builder: (sheetContext) {
-        return _StarSpeakSheet(
-          phrases: kStarPhrases,
-          onSpeak: _speakStarPhrase,
-          onMore: () {
-            Navigator.of(sheetContext).pop();
-            widget.onVocabulary();
-          },
-          onContactFamily: () {
-            Navigator.of(sheetContext).pop();
-            _showFamilyContactPlaceholder();
-          },
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogContext, _, __) {
+        return Center(
+          child: Material(
+            color: Colors.transparent,
+            child: _StarSpeakSheet(
+              phrases: kStarPhrases,
+              onSpeak: _speakStarPhrase,
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: .96, end: 1).animate(curved),
+            child: child,
+          ),
         );
       },
     );
@@ -446,25 +417,6 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
             style: const TextStyle(fontWeight: FontWeight.w800),
           ),
           duration: const Duration(milliseconds: 850),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xFF2E3038).withValues(alpha: .92),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-        ),
-      );
-  }
-
-  void _showFamilyContactPlaceholder() {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: const Text(
-            '联系家人功能需要先配置联系人',
-            style: TextStyle(fontWeight: FontWeight.w800),
-          ),
-          duration: const Duration(milliseconds: 1100),
           behavior: SnackBarBehavior.floating,
           backgroundColor: const Color(0xFF2E3038).withValues(alpha: .92),
           shape: RoundedRectangleBorder(
@@ -895,6 +847,7 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
       ),
       child: Scaffold(
         extendBody: true,
+        resizeToAvoidBottomInset: false,
         backgroundColor: const Color(0xFFF7F2EA),
         body: Stack(
           children: [
@@ -933,299 +886,6 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
               child: GlassBottomNavigationBar(
                 currentPage: _currentPage,
                 onTap: _goToPage,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _StarSpeakSheet extends StatefulWidget {
-  const _StarSpeakSheet({
-    required this.phrases,
-    required this.onSpeak,
-    required this.onMore,
-    required this.onContactFamily,
-  });
-
-  final List<StarPhrase> phrases;
-  final Future<void> Function(StarPhrase phrase) onSpeak;
-  final VoidCallback onMore;
-  final VoidCallback onContactFamily;
-
-  @override
-  State<_StarSpeakSheet> createState() => _StarSpeakSheetState();
-}
-
-class _StarSpeakSheetState extends State<_StarSpeakSheet> {
-  String _speakingText = '';
-
-  Future<void> _handleSpeak(StarPhrase phrase) async {
-    if (_speakingText.isNotEmpty) return;
-    setState(() => _speakingText = phrase.text);
-    try {
-      await widget.onSpeak(phrase);
-    } finally {
-      if (mounted) {
-        setState(() => _speakingText = '');
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding:
-            EdgeInsets.fromLTRB(14, 0, 14, math.max(12.0, bottomInset + 8)),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(32),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: .82),
-                borderRadius: BorderRadius.circular(32),
-                border: Border.all(color: Colors.white.withValues(alpha: .88)),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF7E8BA3).withValues(alpha: .20),
-                    blurRadius: 34,
-                    offset: const Offset(0, 18),
-                  ),
-                ],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        width: 50,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFFE2A8),
-                          borderRadius: BorderRadius.circular(20),
-                          boxShadow: [
-                            BoxShadow(
-                              color: const Color(0xFFFFB43F)
-                                  .withValues(alpha: .18),
-                              blurRadius: 18,
-                              offset: const Offset(0, 8),
-                            ),
-                          ],
-                        ),
-                        child: const Icon(
-                          Icons.auto_awesome_rounded,
-                          color: Color(0xFF2E3038),
-                          size: 25,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      const Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '星语',
-                              style: TextStyle(
-                                fontSize: 26,
-                                height: 1.05,
-                                fontWeight: FontWeight.w900,
-                                color: Color(0xFF2E3038),
-                              ),
-                            ),
-                            SizedBox(height: 3),
-                            Text(
-                              '选一句你想说的话',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF7D8490),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  GridView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: widget.phrases.length,
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 10,
-                      childAspectRatio: 1.52,
-                    ),
-                    itemBuilder: (context, index) {
-                      final phrase = widget.phrases[index];
-                      return _StarPhraseCard(
-                        phrase: phrase,
-                        speaking: _speakingText == phrase.text,
-                        disabled: _speakingText.isNotEmpty &&
-                            _speakingText != phrase.text,
-                        onTap: () => _handleSpeak(phrase),
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 14),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _StarBoardActionButton(
-                          icon: Icons.apps_rounded,
-                          label: '更多表达',
-                          onTap: widget.onMore,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _StarBoardActionButton(
-                          icon: Icons.contact_phone_rounded,
-                          label: '联系家人',
-                          onTap: widget.onContactFamily,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StarPhraseCard extends StatelessWidget {
-  const _StarPhraseCard({
-    required this.phrase,
-    required this.speaking,
-    required this.disabled,
-    required this.onTap,
-  });
-
-  final StarPhrase phrase;
-  final bool speaking;
-  final bool disabled;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: disabled ? null : onTap,
-      child: AnimatedScale(
-        duration: const Duration(milliseconds: 160),
-        scale: speaking ? 1.035 : 1,
-        curve: Curves.easeOutCubic,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: disabled
-                ? const Color(0xFFF0F1F4)
-                : phrase.color.withValues(alpha: speaking ? .25 : .16),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(
-              color:
-                  speaking ? phrase.color : Colors.white.withValues(alpha: .84),
-              width: speaking ? 2.2 : 1.1,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: phrase.color.withValues(alpha: speaking ? .22 : .10),
-                blurRadius: speaking ? 22 : 14,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: disabled ? .50 : .78),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white.withValues(alpha: .9)),
-                ),
-                child: Icon(
-                  speaking ? Icons.volume_up_rounded : phrase.icon,
-                  color: disabled
-                      ? const Color(0xFF9AA0AA)
-                      : const Color(0xFF2E3038),
-                  size: 26,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  phrase.text,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: phrase.text.length <= 2 ? 26 : 21,
-                    height: 1.08,
-                    fontWeight: FontWeight.w900,
-                    color: disabled
-                        ? const Color(0xFF9AA0AA)
-                        : const Color(0xFF2E3038),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _StarBoardActionButton extends StatelessWidget {
-  const _StarBoardActionButton({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        height: 52,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: const Color(0xFFF7F5F1),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white.withValues(alpha: .86)),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 20, color: const Color(0xFF4E5A6A)),
-            const SizedBox(width: 7),
-            Text(
-              label,
-              style: const TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w900,
-                color: Color(0xFF4E5A6A),
               ),
             ),
           ],
