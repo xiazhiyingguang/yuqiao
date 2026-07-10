@@ -239,7 +239,8 @@ void main() {
         snapshot.adaptiveActionPlan.evidence.join('\n'),
         contains('长期画像更常接受'),
       );
-      expect(snapshot.rankedExplanations.first.scoreSummary, contains('profile'));
+      expect(
+          snapshot.rankedExplanations.first.scoreSummary, contains('profile'));
     });
 
     test('downgrades repeated skipped auto prompts to observe', () async {
@@ -379,6 +380,29 @@ void main() {
       );
 
       expect(ranked.first, '喝水');
+    });
+
+    test('includes support profile constraints in model hints', () async {
+      agent.updateMemory(
+        recentExpressions: const [],
+        favoriteExpressions: const [],
+        expressionHabits: const [],
+        personalObjects: const [],
+        conversationTerms: const [],
+        supportProfileHints: const [
+          '支持档案：主要困难是听懂别人',
+          '呈现偏好：优先图片、语音',
+        ],
+      );
+
+      final hints = await agent.personalizedPromptHints(
+        feature: 'conversation',
+        prompt: '没有听懂',
+        slot: RecommendationSlot.sentence,
+      );
+
+      expect(hints.join('\n'), contains('主要困难是听懂别人'));
+      expect(hints.join('\n'), contains('优先图片、语音'));
     });
   });
 }

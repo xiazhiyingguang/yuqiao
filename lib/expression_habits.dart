@@ -3,6 +3,8 @@ import 'dart:math' as math;
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'sensitive_local_store.dart';
+
 class ExpressionHabit {
   const ExpressionHabit({
     required this.text,
@@ -168,8 +170,10 @@ class ExpressionHabitStore {
   }
 
   Future<List<ExpressionHabit>> loadAll() async {
-    final preferences = await SharedPreferences.getInstance();
-    final raw = preferences.getString(_storageKey);
+    final raw = await SensitiveLocalStore.readString(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
     if (raw == null || raw.isEmpty) return <ExpressionHabit>[];
     try {
       final decoded = jsonDecode(raw);
@@ -253,16 +257,17 @@ class ExpressionHabitStore {
       return score != 0 ? score : b.lastUsedAt.compareTo(a.lastUsedAt);
     });
     final trimmed = habits.take(_maxHabits).toList(growable: false);
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await SensitiveLocalStore.writeString(
       _storageKey,
       jsonEncode(trimmed.map((habit) => habit.toJson()).toList()),
     );
   }
 
   Future<void> clearAll() async {
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.remove(_storageKey);
+    await SensitiveLocalStore.delete(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
   }
 
   static String bucketFor(DateTime value) {

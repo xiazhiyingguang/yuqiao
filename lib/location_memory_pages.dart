@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'location_recommendation.dart';
+import 'scene_support/scene_catalog.dart';
+import 'scene_support/scene_pack.dart';
 
 typedef FavoriteWordCallback = Future<void> Function(String text);
 
@@ -19,9 +21,11 @@ class CurrentPlaceStatusCard extends StatefulWidget {
   const CurrentPlaceStatusCard({
     super.key,
     required this.controller,
+    this.onOpenScenePack,
   });
 
   final LocationRecommendationController controller;
+  final ValueChanged<ScenePack>? onOpenScenePack;
 
   @override
   State<CurrentPlaceStatusCard> createState() => _CurrentPlaceStatusCardState();
@@ -67,6 +71,7 @@ class _CurrentPlaceStatusCardState extends State<CurrentPlaceStatusCard> {
         final name = userConfirmed
             ? place!.name
             : semantic?.displayName ?? place?.name ?? typeLabel;
+        final scenePack = SceneCatalog.forPlaceType(type);
 
         // 确认后自动隐藏
         if (userConfirmed && _confirmedPlaceId != place!.id) {
@@ -92,48 +97,61 @@ class _CurrentPlaceStatusCardState extends State<CurrentPlaceStatusCard> {
               ],
             ),
             child: userConfirmed
-                ? Row(
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(
-                        CupertinoIcons.location_fill,
-                        color: Color(0xFF267D70),
-                        size: 19,
-                      ),
-                      const SizedBox(width: 9),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              place!.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF1C1C1E),
-                              ),
+                      Row(
+                        children: [
+                          const Icon(
+                            CupertinoIcons.location_fill,
+                            color: Color(0xFF267D70),
+                            size: 19,
+                          ),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  place!.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF1C1C1E),
+                                  ),
+                                ),
+                                Text(
+                                  '$typeLabel · 已确认',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF6E7178),
+                                  ),
+                                ),
+                              ],
                             ),
-                            Text(
-                              '$typeLabel · 已确认',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFF6E7178),
-                              ),
+                          ),
+                          IconButton(
+                            tooltip: '修改地点',
+                            onPressed: () => showPlaceEditorDialog(
+                              context,
+                              controller: widget.controller,
+                              place: place,
                             ),
-                          ],
-                        ),
+                            icon: const Icon(CupertinoIcons.pencil, size: 18),
+                          ),
+                        ],
                       ),
-                      IconButton(
-                        tooltip: '修改地点',
-                        onPressed: () => showPlaceEditorDialog(
-                          context,
-                          controller: widget.controller,
-                          place: place,
+                      if (scenePack != null &&
+                          widget.onOpenScenePack != null) ...[
+                        const SizedBox(height: 9),
+                        _ScenePackPromptButton(
+                          pack: scenePack,
+                          onTap: () => widget.onOpenScenePack!(scenePack),
                         ),
-                        icon: const Icon(CupertinoIcons.pencil, size: 18),
-                      ),
+                      ],
                     ],
                   )
                 : Column(
@@ -208,11 +226,66 @@ class _CurrentPlaceStatusCardState extends State<CurrentPlaceStatusCard> {
                           ),
                         ],
                       ),
+                      if (scenePack != null &&
+                          widget.onOpenScenePack != null) ...[
+                        const SizedBox(height: 8),
+                        _ScenePackPromptButton(
+                          pack: scenePack,
+                          onTap: () => widget.onOpenScenePack!(scenePack),
+                        ),
+                      ],
                     ],
                   ),
           ),
         );
       },
+    );
+  }
+}
+
+class _ScenePackPromptButton extends StatelessWidget {
+  const _ScenePackPromptButton({
+    required this.pack,
+    required this.onTap,
+  });
+
+  final ScenePack pack;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: pack.color.withValues(alpha: .12),
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+          child: Row(
+            children: [
+              Icon(pack.icon, size: 18, color: pack.color),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  pack.promptTitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    height: 1.18,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF2E3038),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(Icons.arrow_forward_ios_rounded,
+                  size: 14, color: pack.color),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -324,56 +397,286 @@ class _PlaceEditorDialogState extends State<_PlaceEditorDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('确认地点'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            TextField(
-              controller: _nameController,
-              maxLength: 24,
-              decoration: const InputDecoration(
-                labelText: '地点名称',
-                hintText: '例如：家、常去的医院',
+    final size = MediaQuery.sizeOf(context);
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 24),
+      backgroundColor: Colors.transparent,
+      child: ConstrainedBox(
+        constraints:
+            BoxConstraints(maxWidth: 420, maxHeight: size.height * .82),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFFCF7),
+            borderRadius: BorderRadius.circular(30),
+            border: Border.all(color: Colors.white.withValues(alpha: .88)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: .12),
+                blurRadius: 32,
+                offset: const Offset(0, 16),
               ),
+            ],
+          ),
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 54,
+                      height: 54,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE6F3EF),
+                        borderRadius: BorderRadius.circular(21),
+                      ),
+                      child: const Icon(
+                        CupertinoIcons.location_fill,
+                        color: Color(0xFF267D70),
+                        size: 25,
+                      ),
+                    ),
+                    const SizedBox(width: 13),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '确认地点',
+                            style: TextStyle(
+                              fontSize: 25,
+                              height: 1.05,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF202226),
+                            ),
+                          ),
+                          SizedBox(height: 4),
+                          Text(
+                            '选择一个最接近的地点标签',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF7C8088),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                TextField(
+                  controller: _nameController,
+                  maxLength: 24,
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF202226),
+                  ),
+                  decoration: InputDecoration(
+                    labelText: '地点名称',
+                    hintText: '例如：家、常去的医院',
+                    prefixIcon: const Icon(
+                      Icons.edit_location_alt_rounded,
+                      color: Color(0xFF267D70),
+                    ),
+                    filled: true,
+                    fillColor: const Color(0xFFF4F7F5),
+                    counterStyle: const TextStyle(color: Color(0xFF9A9EA6)),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(20),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(20),
+                      borderSide: const BorderSide(
+                        color: Color(0xFF267D70),
+                        width: 1.6,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  '地点类型',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF202226),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: PlaceTypeCatalog.editableTypes.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    crossAxisSpacing: 10,
+                    mainAxisSpacing: 10,
+                    childAspectRatio: 2.65,
+                  ),
+                  itemBuilder: (context, index) {
+                    final type = PlaceTypeCatalog.editableTypes[index];
+                    return _PlaceTypeOptionTile(
+                      label: PlaceTypeCatalog.labelOf(type),
+                      icon: _placeTypeIcon(type),
+                      selected: _type == type,
+                      onTap: () => setState(() => _type = type),
+                    );
+                  },
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.pop(context),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(52),
+                          foregroundColor: const Color(0xFF555A61),
+                          side: BorderSide(
+                            color:
+                                const Color(0xFF267D70).withValues(alpha: .18),
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                        ),
+                        child: const Text(
+                          '取消',
+                          style: TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 2,
+                      child: FilledButton(
+                        onPressed: () {
+                          Navigator.pop(
+                            context,
+                            _PlaceEditResult(
+                              _nameController.text.trim(),
+                              _type,
+                            ),
+                          );
+                        },
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size.fromHeight(52),
+                          backgroundColor: const Color(0xFF267D70),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                        ),
+                        child: const Text(
+                          '保存地点',
+                          style: TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-            const SizedBox(height: 10),
-            const Text(
-              '地点类型',
-              style: TextStyle(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 7,
-              runSpacing: 7,
-              children: PlaceTypeCatalog.editableTypes.map((type) {
-                return ChoiceChip(
-                  label: Text(PlaceTypeCatalog.labelOf(type)),
-                  selected: _type == type,
-                  onSelected: (_) => setState(() => _type = type),
-                );
-              }).toList(),
-            ),
-          ],
+          ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('取消'),
+    );
+  }
+
+  IconData _placeTypeIcon(String type) {
+    return switch (PlaceTypeCatalog.normalize(type)) {
+      PlaceTypeCatalog.home => Icons.home_rounded,
+      PlaceTypeCatalog.hospital => Icons.local_hospital_rounded,
+      PlaceTypeCatalog.supermarket => Icons.shopping_cart_rounded,
+      PlaceTypeCatalog.school => Icons.school_rounded,
+      PlaceTypeCatalog.park => Icons.park_rounded,
+      PlaceTypeCatalog.pharmacy => Icons.medication_rounded,
+      PlaceTypeCatalog.rehabilitationCenter => Icons.fitness_center_rounded,
+      PlaceTypeCatalog.restaurant => Icons.restaurant_rounded,
+      PlaceTypeCatalog.transport => Icons.directions_bus_rounded,
+      PlaceTypeCatalog.company => Icons.apartment_rounded,
+      PlaceTypeCatalog.residential => Icons.location_city_rounded,
+      _ => Icons.more_horiz_rounded,
+    };
+  }
+}
+
+class _PlaceTypeOptionTile extends StatelessWidget {
+  const _PlaceTypeOptionTile({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFE0F1EC) : const Color(0xFFF4F3EF),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: selected
+                  ? const Color(0xFF267D70)
+                  : Colors.white.withValues(alpha: .80),
+              width: selected ? 1.7 : 1,
+            ),
+            boxShadow: selected
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFF267D70).withValues(alpha: .14),
+                      blurRadius: 14,
+                      offset: const Offset(0, 6),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            children: [
+              Icon(
+                selected ? Icons.check_circle_rounded : icon,
+                size: 20,
+                color: selected
+                    ? const Color(0xFF267D70)
+                    : const Color(0xFF777C83),
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                    color: selected
+                        ? const Color(0xFF1D5D54)
+                        : const Color(0xFF3F444A),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
-        FilledButton(
-          onPressed: () {
-            Navigator.pop(
-              context,
-              _PlaceEditResult(_nameController.text.trim(), _type),
-            );
-          },
-          child: const Text('保存'),
-        ),
-      ],
+      ),
     );
   }
 }

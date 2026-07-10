@@ -5,7 +5,8 @@ import 'dart:typed_data';
 
 import 'package:image/image.dart' as image_lib;
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
+import 'sensitive_local_store.dart';
 
 class PersonalObject {
   const PersonalObject({
@@ -109,8 +110,10 @@ class PersonalObjectStore {
   static const _storageKey = 'personal_objects_v1';
 
   Future<List<PersonalObject>> loadAll() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_storageKey) ?? const [];
+    final raw = await SensitiveLocalStore.readStringList(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
     final objects = raw
         .map((item) {
           try {
@@ -195,8 +198,7 @@ class PersonalObjectStore {
   }
 
   Future<void> _save(List<PersonalObject> objects) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
+    await SensitiveLocalStore.writeStringList(
       _storageKey,
       objects.map((item) => jsonEncode(item.toJson())).toList(),
     );

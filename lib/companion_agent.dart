@@ -1,12 +1,11 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:shared_preferences/shared_preferences.dart';
-
 import 'conversation_terms.dart';
 import 'expression_habits.dart';
 import 'location_recommendation.dart';
 import 'personal_objects.dart';
+import 'sensitive_local_store.dart';
 import 'user_learning.dart';
 
 enum CompanionFeedbackAction {
@@ -248,6 +247,7 @@ class UserContextModel {
     required this.personalObjects,
     required this.conversationTerms,
     required this.placeWords,
+    required this.supportProfileHints,
   });
 
   final DateTime capturedAt;
@@ -265,6 +265,7 @@ class UserContextModel {
   final List<PersonalObject> personalObjects;
   final List<ConversationTerm> conversationTerms;
   final List<PlaceWordUsage> placeWords;
+  final List<String> supportProfileHints;
 
   List<ConversationTerm> termsOfType(String type) {
     final normalizedType = normalizeConversationTermType(type);
@@ -322,6 +323,7 @@ class UserContextModel {
       if (objectNames.isNotEmpty) '个人物品：${objectNames.take(5).join('、')}',
       if (favoriteExpressions.isNotEmpty)
         '收藏表达：${favoriteExpressions.take(4).join('、')}',
+      ...supportProfileHints.take(4),
       if (compactTranscript.isNotEmpty) '最近对话：$compactTranscript',
       if (latestUserFragment.trim().isNotEmpty) '用户最后片段：$latestUserFragment',
     ];
@@ -351,6 +353,7 @@ class CompanionAgentController {
   List<ExpressionHabit> _expressionHabits = const [];
   List<PersonalObject> _personalObjects = const [];
   List<ConversationTerm> _conversationTerms = const [];
+  List<String> _supportProfileHints = const [];
   String _recentTranscript = '';
   String _latestUserFragment = '';
   String _userSpeakerLabel = '';
@@ -363,6 +366,7 @@ class CompanionAgentController {
     required List<ExpressionHabit> expressionHabits,
     required List<PersonalObject> personalObjects,
     required List<ConversationTerm> conversationTerms,
+    List<String> supportProfileHints = const [],
     bool learningEnabled = true,
   }) {
     _recentExpressions = List.unmodifiable(recentExpressions);
@@ -370,6 +374,7 @@ class CompanionAgentController {
     _expressionHabits = List.unmodifiable(expressionHabits);
     _personalObjects = List.unmodifiable(personalObjects);
     _conversationTerms = List.unmodifiable(conversationTerms);
+    _supportProfileHints = List.unmodifiable(supportProfileHints);
     _learningEnabled = learningEnabled;
   }
 
@@ -423,6 +428,7 @@ class CompanionAgentController {
       placeWords: place == null
           ? const []
           : _locationController.wordsForPlace(place.id),
+      supportProfileHints: _supportProfileHints,
     );
   }
 
@@ -1770,8 +1776,7 @@ class CompanionFeedbackStore {
     if (entries.length > _maxEntries) {
       entries.removeRange(0, entries.length - _maxEntries);
     }
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await SensitiveLocalStore.writeString(
       _storageKey,
       jsonEncode(entries.map((entry) => entry.toJson()).toList()),
     );
@@ -1796,8 +1801,7 @@ class CompanionFeedbackStore {
     if (entries.length > _maxEntries) {
       entries.removeRange(0, entries.length - _maxEntries);
     }
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await SensitiveLocalStore.writeString(
       _storageKey,
       jsonEncode(entries.map((entry) => entry.toJson()).toList()),
     );
@@ -1950,8 +1954,10 @@ class CompanionFeedbackStore {
   }
 
   Future<void> clearAll() async {
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.remove(_storageKey);
+    await SensitiveLocalStore.delete(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
   }
 
   static bool _matchesAnyKey(
@@ -1973,8 +1979,10 @@ class CompanionFeedbackStore {
   }
 
   Future<List<_CompanionFeedbackEntry>> _load() async {
-    final preferences = await SharedPreferences.getInstance();
-    final raw = preferences.getString(_storageKey);
+    final raw = await SensitiveLocalStore.readString(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
     if (raw == null || raw.isEmpty) return [];
     try {
       final decoded = jsonDecode(raw);

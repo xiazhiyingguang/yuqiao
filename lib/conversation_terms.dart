@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:shared_preferences/shared_preferences.dart';
+import 'sensitive_local_store.dart';
 
 class ConversationTermCandidate {
   const ConversationTermCandidate({
@@ -83,8 +83,10 @@ class ConversationTermStore {
   static const _storageKey = 'conversation_special_terms_v1';
 
   Future<List<ConversationTerm>> loadAll() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_storageKey) ?? const [];
+    final raw = await SensitiveLocalStore.readStringList(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
     final terms = raw
         .map((value) {
           try {
@@ -135,8 +137,7 @@ class ConversationTermStore {
   }
 
   Future<void> _save(List<ConversationTerm> terms) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
+    await SensitiveLocalStore.writeStringList(
       _storageKey,
       terms.map((term) => jsonEncode(term.toJson())).toList(),
     );

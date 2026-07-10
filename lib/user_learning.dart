@@ -1,9 +1,8 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:shared_preferences/shared_preferences.dart';
-
 import 'location_recommendation.dart';
+import 'sensitive_local_store.dart';
 
 class UserLearningEvent {
   const UserLearningEvent({
@@ -965,6 +964,14 @@ class UserPreferenceProfileBuilder {
     var expressionStyleSampleCount = 0;
 
     for (final event in events) {
+      if (_isRehabilitationEvent(event)) {
+        featureScores.update(
+          event.feature,
+          (value) => value + _eventPolarity(event),
+          ifAbsent: () => _eventPolarity(event),
+        );
+        continue;
+      }
       if (!_isInternalActionEvent(event)) {
         _updateExpression(expressionStats, event);
         _updateExpressionSlotNames(expressionSlots, event);
@@ -1301,6 +1308,11 @@ class UserPreferenceProfileBuilder {
     return event.text.startsWith('action:') ||
         event.intentTag.startsWith('action_plan_');
   }
+
+  static bool _isRehabilitationEvent(UserLearningEvent event) {
+    return event.feature == 'training' ||
+        event.intentTag.startsWith('training_');
+  }
 }
 
 class UserLearningStore {
@@ -1313,16 +1325,17 @@ class UserLearningStore {
     if (events.length > _maxEvents) {
       events.removeRange(0, events.length - _maxEvents);
     }
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await SensitiveLocalStore.writeString(
       _storageKey,
       jsonEncode(events.map((event) => event.toJson()).toList()),
     );
   }
 
   Future<List<UserLearningEvent>> loadEvents() async {
-    final preferences = await SharedPreferences.getInstance();
-    final raw = preferences.getString(_storageKey);
+    final raw = await SensitiveLocalStore.readString(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
     if (raw == null || raw.isEmpty) return <UserLearningEvent>[];
     try {
       final decoded = jsonDecode(raw);
@@ -1344,8 +1357,10 @@ class UserLearningStore {
   }
 
   Future<void> clear() async {
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.remove(_storageKey);
+    await SensitiveLocalStore.delete(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
   }
 }
 

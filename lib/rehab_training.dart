@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'expression_habits.dart';
 import 'mulberry_symbols.dart';
 import 'personal_objects.dart';
+import 'sensitive_local_store.dart';
 import 'user_learning.dart';
 
 class RehabTrainingProgress {
@@ -185,8 +186,10 @@ class RehabTrainingStore {
   static const _difficultyKey = 'rehab_training_difficulty_v1';
 
   Future<Map<String, RehabTrainingProgress>> loadAll() async {
-    final preferences = await SharedPreferences.getInstance();
-    final raw = preferences.getString(_storageKey);
+    final raw = await SensitiveLocalStore.readString(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
     if (raw == null || raw.isEmpty) return {};
     try {
       final decoded = jsonDecode(raw);
@@ -220,16 +223,17 @@ class RehabTrainingStore {
           nextReviewAt: null,
         );
     progress[key] = current.record(correct: correct);
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await SensitiveLocalStore.writeString(
       _storageKey,
       jsonEncode(progress.values.map((item) => item.toJson()).toList()),
     );
   }
 
   Future<void> clearAll() async {
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.remove(_storageKey);
+    await SensitiveLocalStore.delete(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
   }
 
   Future<RehabTrainingDifficulty> loadDifficulty() async {

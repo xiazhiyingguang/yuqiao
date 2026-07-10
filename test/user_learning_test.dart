@@ -714,4 +714,27 @@ void main() {
     expect(profile.objectPatterns.first.key, contains('mybluecup'));
     expect(profile.displaySummaryLines().join('\n'), contains('物品相关'));
   });
+
+  test('rehabilitation events do not change communication preferences', () {
+    final profile = const UserPreferenceProfileBuilder().build([
+      UserLearningEvent(
+        feature: 'training',
+        action: 'accepted',
+        text: '喝水',
+        normalizedText: '喝水',
+        intentTag: 'training_correct',
+        objectTag: '',
+        placeType: 'unknown',
+        timeBucket: 'training',
+        slotName: 'topic',
+        createdAt: DateTime(2026, 7, 10, 10),
+      ),
+    ]);
+
+    expect(profile.stats.featureCounts['training'], 1);
+    expect(profile.topExpressions, isEmpty);
+    expect(profile.semanticPreferences, isEmpty);
+    expect(profile.intentPatterns, isEmpty);
+    expect(profile.expressionScore('我想喝水'), 0);
+  });
 }

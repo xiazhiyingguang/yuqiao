@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' show Rect;
@@ -29,8 +30,8 @@ class LocalObjectLocator {
   ObjectDetector? _detector;
 
   Future<List<LocalObjectBox>> detect(Uint8List imageBytes) async {
-    final decoded = image_lib.decodeImage(imageBytes);
-    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
+    final imageSize = await Isolate.run(() => _decodeImageSize(imageBytes));
+    if (imageSize == null || imageSize[0] <= 0 || imageSize[1] <= 0) {
       return const [];
     }
 
@@ -50,7 +51,11 @@ class LocalObjectLocator {
       final boxes = <LocalObjectBox>[];
       for (final object in objects) {
         final rect = object.boundingBox;
-        final normalized = _normalizeRect(rect, decoded.width, decoded.height);
+        final normalized = _normalizeRect(
+          rect,
+          imageSize[0],
+          imageSize[1],
+        );
         if (normalized == null) continue;
         final confidence = object.labels.isEmpty
             ? 0.55
@@ -100,4 +105,10 @@ class LocalObjectLocator {
     if (right - left < 8 || bottom - top < 8) return null;
     return [left, top, right, bottom];
   }
+}
+
+List<int>? _decodeImageSize(Uint8List bytes) {
+  final decoded = image_lib.decodeImage(bytes);
+  if (decoded == null) return null;
+  return [decoded.width, decoded.height];
 }

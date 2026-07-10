@@ -8,12 +8,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'location_recommendation.dart'; // TODO: 璋冭瘯鐢紝浠ュ悗鍒犻櫎
 import 'location_memory_pages.dart';
 import 'my_test.dart' as profile_ui;
 import 'rehab_training.dart';
+import 'sensitive_local_store.dart';
+import 'scene_support/scene_pack.dart';
+import 'scene_support/scene_support_page.dart';
 
 part 'star_speak_sheet.dart';
 
@@ -130,6 +133,7 @@ class MainInterfaceScreen extends StatefulWidget {
       locationController; // TODO: 璋冭瘯鐢紝浠ュ悗鍒犻櫎
   final FavoriteWordCallback? onFavoriteSaved;
   final FavoriteWordCallback? onStarPhraseSpoken;
+  final VoidCallback? onStarLongPress;
   final VoidCallback? onOpenYuqiaoMemory;
   final VoidCallback? onOpenPersonalObjects;
 
@@ -156,6 +160,7 @@ class MainInterfaceScreen extends StatefulWidget {
     this.locationController,
     this.onFavoriteSaved,
     this.onStarPhraseSpoken,
+    this.onStarLongPress,
     this.onOpenYuqiaoMemory,
     this.onOpenPersonalObjects,
   });
@@ -426,6 +431,22 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
       );
   }
 
+  Future<void> _openSceneSupport(ScenePack pack) async {
+    final locationController = widget.locationController;
+    if (locationController == null) return;
+    HapticFeedback.lightImpact();
+    await Navigator.of(context).push(
+      CupertinoPageRoute(
+        builder: (_) => SceneSupportPage(
+          pack: pack,
+          locationController: locationController,
+          onExpressionSpoken:
+              widget.onStarPhraseSpoken ?? widget.onFavoriteSaved,
+        ),
+      ),
+    );
+  }
+
   void _onPageChanged(int page) {
     setState(() => _currentPage = page);
     _syncStarIdleAnimation();
@@ -469,6 +490,7 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
                 right: 22,
                 child: CurrentPlaceStatusCard(
                   controller: widget.locationController!,
+                  onOpenScenePack: _openSceneSupport,
                 ),
               ),
             Positioned.fill(
@@ -533,6 +555,12 @@ class _MainInterfaceScreenState extends State<MainInterfaceScreen>
                                 child: GestureDetector(
                                   behavior: HitTestBehavior.opaque,
                                   onTap: _openStarSpeakBoard,
+                                  onLongPress: widget.onStarLongPress == null
+                                      ? null
+                                      : () {
+                                          HapticFeedback.mediumImpact();
+                                          widget.onStarLongPress?.call();
+                                        },
                                   child: SpriteWidget(
                                     mood: _isAnyBubbleNearStar
                                         ? SpriteMood.nearTarget

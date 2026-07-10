@@ -343,26 +343,45 @@ class AmapPlaceSemanticService implements PlaceSemanticService {
   const AmapPlaceSemanticService();
 
   static const String _apiKey = String.fromEnvironment('AMAP_WEB_KEY');
+  static const String _proxyUrl = String.fromEnvironment(
+    'YUQIAO_AMAP_PROXY_URL',
+  );
+  static const String _proxyToken = String.fromEnvironment(
+    'YUQIAO_PROXY_TOKEN',
+  );
 
   @override
   bool get isConfigured {
     final key = _apiKey.trim();
-    return key.isNotEmpty && !key.contains('你的') && key.length >= 20;
+    return _proxyUrl.trim().isNotEmpty ||
+        (key.isNotEmpty && !key.contains('你的') && key.length >= 20);
   }
 
   @override
   Future<PlaceSemantic?> recognize(double latitude, double longitude) async {
     if (!isConfigured) return null;
     final converted = _wgs84ToGcj02(latitude, longitude);
-    final uri = Uri.https('restapi.amap.com', '/v3/geocode/regeo', {
-      'key': _apiKey,
-      'location': '${converted.longitude},${converted.latitude}',
-      'radius': '120',
-      'extensions': 'all',
-      'batch': 'false',
-      'roadlevel': '1',
-    });
-    final response = await http.get(uri).timeout(const Duration(seconds: 5));
+    final uri = _proxyUrl.trim().isEmpty
+        ? Uri.https('restapi.amap.com', '/v3/geocode/regeo', {
+            'key': _apiKey,
+            'location': '${converted.longitude},${converted.latitude}',
+            'radius': '120',
+            'extensions': 'all',
+            'batch': 'false',
+            'roadlevel': '1',
+          })
+        : Uri.parse(_proxyUrl).replace(queryParameters: {
+            ...Uri.parse(_proxyUrl).queryParameters,
+            'longitude': converted.longitude.toString(),
+            'latitude': converted.latitude.toString(),
+          });
+    final response = await http.get(
+      uri,
+      headers: {
+        if (_proxyUrl.trim().isNotEmpty && _proxyToken.trim().isNotEmpty)
+          'Authorization': 'Bearer $_proxyToken',
+      },
+    ).timeout(const Duration(seconds: 5));
     if (response.statusCode != 200) {
       throw AmapServiceException('HTTP ${response.statusCode}');
     }

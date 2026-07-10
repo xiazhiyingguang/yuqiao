@@ -34,8 +34,14 @@ class XfyunRealtimeAsrService {
   static const String _appId = String.fromEnvironment('XFYUN_APP_ID');
   static const String _apiKey = String.fromEnvironment('XFYUN_API_KEY');
   static const String _apiSecret = String.fromEnvironment('XFYUN_API_SECRET');
+  static const String _proxyUrl = String.fromEnvironment(
+    'YUQIAO_XFYUN_PROXY_WS_URL',
+  );
   static const String _endpoint =
       'wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1';
+  static const String _proxyToken = String.fromEnvironment(
+    'YUQIAO_PROXY_TOKEN',
+  );
   static const int _frameSize = 1280;
 
   final AudioRecorder _recorder = AudioRecorder();
@@ -63,9 +69,11 @@ class XfyunRealtimeAsrService {
     required XfyunErrorCallback onError,
   }) async {
     if (_active) return;
-    if (_appId.isEmpty || _apiKey.isEmpty || _apiSecret.isEmpty) {
+    final usesProxy = _proxyUrl.trim().isNotEmpty;
+    if (!usesProxy &&
+        (_appId.isEmpty || _apiKey.isEmpty || _apiSecret.isEmpty)) {
       throw const XfyunAsrException(
-        '缺少 XFYUN_APP_ID、XFYUN_API_KEY 或 XFYUN_API_SECRET。',
+        '缺少 XFYUN_APP_ID、XFYUN_API_KEY、XFYUN_API_SECRET 或 YUQIAO_XFYUN_PROXY_WS_URL。',
       );
     }
     if (!await _recorder.hasPermission()) {
@@ -86,8 +94,12 @@ class XfyunRealtimeAsrService {
 
     try {
       final socket = await WebSocket.connect(
-        _buildAuthenticatedUrl(_requestId!),
-        headers: {'user-agent': 'yuqiao-flutter/0.1.0'},
+        usesProxy ? _proxyUrl : _buildAuthenticatedUrl(_requestId!),
+        headers: {
+          if (usesProxy && _proxyToken.trim().isNotEmpty)
+            'Authorization': 'Bearer $_proxyToken',
+          'user-agent': 'yuqiao-flutter/0.1.0',
+        },
       ).timeout(const Duration(seconds: 12));
       _socket = socket;
       _active = true;

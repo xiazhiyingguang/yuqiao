@@ -358,9 +358,11 @@ class _StarSpeakSheetState extends State<_StarSpeakSheet> {
   }
 
   Future<void> _loadContact() async {
-    final preferences = await SharedPreferences.getInstance();
-    final contact =
-        _StarFamilyContact.fromJson(preferences.getString(_contactStorageKey));
+    final raw = await SensitiveLocalStore.readString(
+      _contactStorageKey,
+      legacySharedPreferencesKey: _contactStorageKey,
+    );
+    final contact = _StarFamilyContact.fromJson(raw);
     if (!mounted) return;
     setState(() {
       _contact = contact;
@@ -382,8 +384,7 @@ class _StarSpeakSheetState extends State<_StarSpeakSheet> {
       phone: phone,
       message: message.isEmpty ? '请帮我联系家人' : message,
     );
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await SensitiveLocalStore.writeString(
       _contactStorageKey,
       jsonEncode(contact.toJson()),
     );
@@ -470,6 +471,41 @@ class _StarSpeakSheetState extends State<_StarSpeakSheet> {
     }
     await Clipboard.setData(ClipboardData(text: phone));
     _showLocalMessage('已复制电话：$phone');
+  }
+
+  Future<void> _callFamilyContact() async {
+    final rawPhone = _contact?.phone.trim() ?? '';
+    final phone = _dialablePhoneNumber(rawPhone);
+    if (phone.isEmpty) {
+      _showLocalMessage('请先填写家属电话');
+      _editFamilyContact();
+      return;
+    }
+    HapticFeedback.mediumImpact();
+    final uri = Uri(scheme: 'tel', path: phone);
+    try {
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!launched) {
+        _showLocalMessage('当前设备无法打开电话');
+      }
+    } catch (_) {
+      _showLocalMessage('拨号失败，请检查电话应用');
+    }
+  }
+
+  String _dialablePhoneNumber(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return '';
+    final buffer = StringBuffer();
+    for (var i = 0; i < trimmed.length; i++) {
+      final char = trimmed[i];
+      final isDigit = char.codeUnitAt(0) >= 48 && char.codeUnitAt(0) <= 57;
+      if (isDigit || (char == '+' && buffer.isEmpty)) {
+        buffer.write(char);
+      }
+    }
+    return buffer.toString();
   }
 
   String get _title {
@@ -799,20 +835,29 @@ class _StarSpeakSheetState extends State<_StarSpeakSheet> {
           children: [
             Expanded(
               child: _StarBoardActionButton(
-                icon: Icons.volume_up_rounded,
-                label: '播报求助',
-                onTap: _speakFamilyHelp,
+                icon: Icons.call_rounded,
+                label: '拨打电话',
+                onTap: _callFamilyContact,
               ),
             ),
             const SizedBox(width: 10),
             Expanded(
               child: _StarBoardActionButton(
-                icon: Icons.copy_rounded,
-                label: '复制电话',
-                onTap: _copyPhone,
+                icon: Icons.volume_up_rounded,
+                label: '播报求助',
+                onTap: _speakFamilyHelp,
               ),
             ),
           ],
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: _StarBoardActionButton(
+            icon: Icons.copy_rounded,
+            label: '复制电话',
+            onTap: _copyPhone,
+          ),
         ),
       ],
     );

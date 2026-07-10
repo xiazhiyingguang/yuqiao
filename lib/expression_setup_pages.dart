@@ -262,6 +262,11 @@ class _SupportProfileSetupPageState extends State<SupportProfileSetupPage> {
     _complete();
   }
 
+  void _previous() {
+    if (_step <= 0 || _isSaving) return;
+    setState(() => _step -= 1);
+  }
+
   Future<void> _complete() async {
     if (_isSaving) return;
     setState(() => _isSaving = true);
@@ -477,11 +482,40 @@ class _SupportProfileSetupPageState extends State<SupportProfileSetupPage> {
     };
   }
 
+  Widget _buildAnimatedStepBody() {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      layoutBuilder: (currentChild, previousChildren) {
+        return currentChild ?? const SizedBox.shrink();
+      },
+      transitionBuilder: (child, animation) {
+        final childStep = (child.key as ValueKey<int>).value;
+        final forward = childStep >= _step;
+        final offset = Tween<Offset>(
+          begin: Offset(forward ? 0.08 : -0.08, 0),
+          end: Offset.zero,
+        ).animate(animation);
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(position: offset, child: child),
+        );
+      },
+      child: SingleChildScrollView(
+        key: ValueKey<int>(_step),
+        physics: const BouncingScrollPhysics(),
+        padding: const EdgeInsets.only(bottom: 4),
+        child: _buildStepBody(),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final progress = (_step + 1) / 5;
     return Scaffold(
-      backgroundColor: const Color(0xFFF7F2EA),
+      backgroundColor: const Color(0xFFF6F0E7),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(22, 16, 22, 26),
@@ -492,12 +526,24 @@ class _SupportProfileSetupPageState extends State<SupportProfileSetupPage> {
                   width: 58,
                   height: 58,
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFFE2C8),
+                    gradient: const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color(0xFFFFD7B0), Color(0xFFFFECCF)],
+                    ),
                     borderRadius: BorderRadius.circular(22),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFFD7A86E).withValues(alpha: 0.18),
+                        blurRadius: 18,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
                   ),
                   child: const Icon(
                     Icons.auto_awesome_rounded,
                     color: Color(0xFF26282D),
+                    size: 28,
                   ),
                 ),
                 const SizedBox(width: 14),
@@ -519,47 +565,48 @@ class _SupportProfileSetupPageState extends State<SupportProfileSetupPage> {
               child: LinearProgressIndicator(
                 value: progress,
                 minHeight: 8,
-                backgroundColor: Colors.white.withValues(alpha: 0.65),
-                color: const Color(0xFF5F8DF7),
+                backgroundColor: Colors.white.withValues(alpha: 0.76),
+                color: const Color(0xFF2E3038),
               ),
             ),
             const SizedBox(height: 22),
-            _PreferenceCard(
-              title: _stepTitle,
-              subtitle: _stepSubtitle,
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 220),
-                child: KeyedSubtree(
-                  key: ValueKey<int>(_step),
-                  child: _buildStepBody(),
-                ),
+            SizedBox(
+              height: math.max(
+                390.0,
+                MediaQuery.sizeOf(context).height -
+                    MediaQuery.paddingOf(context).vertical -
+                    238,
+              ),
+              child: _PreferenceCard(
+                title: _stepTitle,
+                subtitle: _stepSubtitle,
+                fillChild: true,
+                child: _buildAnimatedStepBody(),
               ),
             ),
             const SizedBox(height: 22),
             Row(
               children: [
-                if (_step > 0)
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed:
-                          _isSaving ? null : () => setState(() => _step -= 1),
-                      style: OutlinedButton.styleFrom(
-                        minimumSize: const Size.fromHeight(56),
-                        foregroundColor: const Color(0xFF4A4B50),
-                        side: BorderSide(
-                          color: Colors.white.withValues(alpha: 0.9),
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(20),
-                        ),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: _isSaving || _step == 0 ? null : _previous,
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size.fromHeight(56),
+                      foregroundColor: const Color(0xFF4A4B50),
+                      side: BorderSide(
+                        color: Colors.white.withValues(alpha: 0.9),
                       ),
-                      child: const Text(
-                        '上一步',
-                        style: TextStyle(fontWeight: FontWeight.w900),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
                       ),
                     ),
+                    child: const Text(
+                      '上一步',
+                      style: TextStyle(fontWeight: FontWeight.w900),
+                    ),
                   ),
-                if (_step > 0) const SizedBox(width: 12),
+                ),
+                const SizedBox(width: 12),
                 Expanded(
                   flex: 2,
                   child: ElevatedButton(
@@ -567,8 +614,10 @@ class _SupportProfileSetupPageState extends State<SupportProfileSetupPage> {
                     style: ElevatedButton.styleFrom(
                       elevation: 0,
                       minimumSize: const Size.fromHeight(56),
-                      backgroundColor: const Color(0xFF5F8DF7),
+                      backgroundColor: const Color(0xFF2E3038),
                       foregroundColor: Colors.white,
+                      disabledBackgroundColor:
+                          const Color(0xFF2E3038).withValues(alpha: 0.38),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(20),
                       ),
@@ -922,25 +971,27 @@ class _PreferenceCard extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.child,
+    this.fillChild = false,
   });
 
   final String title;
   final String subtitle;
   final Widget child;
+  final bool fillChild;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.72)),
+        color: Colors.white.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.88)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.045),
-            blurRadius: 22,
-            offset: const Offset(0, 12),
+            color: const Color(0xFF6F6558).withValues(alpha: 0.08),
+            blurRadius: 30,
+            offset: const Offset(0, 16),
           ),
         ],
       ),
@@ -966,7 +1017,7 @@ class _PreferenceCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          child,
+          if (fillChild) Expanded(child: child) else child,
         ],
       ),
     );

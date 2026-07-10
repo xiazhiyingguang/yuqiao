@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:shared_preferences/shared_preferences.dart';
+import 'sensitive_local_store.dart';
 
 class ConversationFeedbackProfile {
   const ConversationFeedbackProfile({
@@ -81,16 +81,17 @@ class ConversationFeedbackStore {
     if (entries.length > _maxEntries) {
       entries.removeRange(0, entries.length - _maxEntries);
     }
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setString(
+    await SensitiveLocalStore.writeString(
       _storageKey,
       jsonEncode(entries.map((entry) => entry.toJson()).toList()),
     );
   }
 
   Future<List<_ConversationFeedbackEntry>> _load() async {
-    final preferences = await SharedPreferences.getInstance();
-    final raw = preferences.getString(_storageKey);
+    final raw = await SensitiveLocalStore.readString(
+      _storageKey,
+      legacySharedPreferencesKey: _storageKey,
+    );
     if (raw == null || raw.isEmpty) return [];
     try {
       final decoded = jsonDecode(raw);

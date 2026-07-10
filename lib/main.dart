@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:camerawesome/camerawesome_plugin.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart' show compute, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
@@ -27,6 +28,8 @@ import 'paraformer_asr_service.dart';
 import 'personal_object_match_policy.dart';
 import 'personal_object_pages.dart';
 import 'personal_objects.dart';
+import 'rehab_training.dart';
+import 'sensitive_local_store.dart';
 import 'star_home.dart' as star_ui;
 import 'stuck_expression_flow.dart';
 import 'user_learning.dart';
@@ -34,6 +37,10 @@ import 'voice_orb_test_page.dart' show VoiceOrbPainter, VoiceDotsIndicator;
 import 'xfyun_realtime_asr_service.dart';
 
 part 'expression_setup_pages.dart';
+part 'qwen_service.dart';
+part 'sprite_assistant.dart';
+part 'camera_word_pages.dart';
+part 'stuck_flow_pages.dart';
 
 typedef ExpressionCallback = Future<void> Function(String text);
 typedef HabitRecordCallback = Future<void> Function(
@@ -44,6 +51,16 @@ typedef HabitRecordCallback = Future<void> Function(
 });
 typedef VocabularyChangedCallback = Future<void> Function(
     List<VocabularyEntry> entries);
+typedef ExpressionPreferenceChangedCallback = Future<void> Function(
+  ExpressionPreference preference,
+);
+typedef ExpressionPreferenceGetter = ExpressionPreference Function();
+typedef VocabularyEntriesGetter = List<VocabularyEntry> Function();
+typedef FavoriteExpressionsGetter = List<String> Function();
+typedef FavoriteExpressionsChangedCallback = Future<void> Function(
+  List<String> favorites,
+);
+typedef BoolSettingChangedCallback = Future<void> Function(bool enabled);
 
 enum YuqiaoFeature {
   stuck,
@@ -147,6 +164,7 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
 
   @override
   void dispose() {
+    _qwenService.dispose();
     _locationController
       ..removeListener(_handleLocationChanged)
       ..dispose();
@@ -163,16 +181,32 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
     List<ExpressionHabit>? expressionHabits,
     List<PersonalObject>? personalObjects,
     List<ConversationTerm>? conversationTerms,
+    SupportProfile? supportProfile,
     bool? learningEnabled,
   }) {
+    final activeProfile = supportProfile ?? _supportProfile;
     _companionAgent.updateMemory(
       recentExpressions: recentExpressions ?? _recentExpressions,
       favoriteExpressions: favoriteExpressions ?? _favoriteExpressions,
       expressionHabits: expressionHabits ?? _expressionHabits,
       personalObjects: personalObjects ?? _personalObjects,
       conversationTerms: conversationTerms ?? _conversationTerms,
+      supportProfileHints: _supportProfileHints(activeProfile),
       learningEnabled: learningEnabled ?? _personalizedLearningEnabled,
     );
+  }
+
+  List<String> _supportProfileHints(SupportProfile profile) {
+    if (!profile.completed) return const [];
+    return [
+      if (profile.difficulties.isNotEmpty)
+        '支持档案：主要困难是${profile.difficulties.join('、')}',
+      if (profile.cuePreferences.isNotEmpty)
+        '呈现偏好：优先${profile.cuePreferences.join('、')}',
+      if (profile.scenes.isNotEmpty) '常用场景：${profile.scenes.join('、')}',
+      '交互限制：每次最多 ${profile.candidateCount} 项候选',
+      if (profile.needsFamilyAssist) '配置偏好：需要家属协助',
+    ];
   }
 
   Future<void> _loadLocalData() async {
@@ -237,6 +271,7 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
       expressionHabits: habits,
       personalObjects: personalObjects,
       conversationTerms: conversationTerms,
+      supportProfile: supportProfile,
       learningEnabled: personalizedLearningEnabled,
     );
     if (!mounted) return;
@@ -291,6 +326,11 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
       source: 'favorite',
       favorite: true,
     );
+    await _loadLocalData();
+  }
+
+  Future<void> _saveFavoriteExpressions(List<String> favorites) async {
+    await _store.saveFavoriteExpressions(favorites);
     await _loadLocalData();
   }
 
@@ -412,6 +452,7 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
     _locationController.updateFavoriteWords(updatedFavorites);
     _syncCompanionMemory(
       favoriteExpressions: updatedFavorites,
+      supportProfile: completedProfile,
       learningEnabled: completedProfile.rememberChoices,
     );
     if (!mounted) return;
@@ -481,8 +522,12 @@ class _YuqiaoAppState extends State<YuqiaoApp> {
                     vocabularyEntries: _vocabularyEntries,
                     personalObjects: _personalObjects,
                     personalObjectStore: _personalObjectStore,
+                    currentExpressionPreference: () => _expressionPreference,
+                    currentVocabularyEntries: () => _vocabularyEntries,
+                    currentFavoriteExpressions: () => _favoriteExpressions,
                     onExpressionCompleted: _recordExpression,
                     onFavoriteSaved: _saveFavorite,
+                    onFavoriteExpressionsChanged: _saveFavoriteExpressions,
                     onHabitRecorded: _recordHabit,
                     onPersonalizedLearningChanged:
                         _setPersonalizedLearningEnabled,
@@ -512,8 +557,12 @@ class HomePage extends StatelessWidget {
     required this.vocabularyEntries,
     required this.personalObjects,
     required this.personalObjectStore,
+    required this.currentExpressionPreference,
+    required this.currentVocabularyEntries,
+    required this.currentFavoriteExpressions,
     required this.onExpressionCompleted,
     required this.onFavoriteSaved,
+    required this.onFavoriteExpressionsChanged,
     required this.onHabitRecorded,
     required this.onPersonalizedLearningChanged,
     required this.onAutoStuckDetectionChanged,
@@ -535,12 +584,16 @@ class HomePage extends StatelessWidget {
   final List<VocabularyEntry> vocabularyEntries;
   final List<PersonalObject> personalObjects;
   final PersonalObjectStore personalObjectStore;
+  final ExpressionPreferenceGetter currentExpressionPreference;
+  final VocabularyEntriesGetter currentVocabularyEntries;
+  final FavoriteExpressionsGetter currentFavoriteExpressions;
   final ExpressionCallback onExpressionCompleted;
   final ExpressionCallback onFavoriteSaved;
+  final FavoriteExpressionsChangedCallback onFavoriteExpressionsChanged;
   final HabitRecordCallback onHabitRecorded;
-  final ValueChanged<bool> onPersonalizedLearningChanged;
-  final ValueChanged<bool> onAutoStuckDetectionChanged;
-  final ValueChanged<ExpressionPreference> onExpressionPreferenceChanged;
+  final BoolSettingChangedCallback onPersonalizedLearningChanged;
+  final BoolSettingChangedCallback onAutoStuckDetectionChanged;
+  final ExpressionPreferenceChangedCallback onExpressionPreferenceChanged;
   final VoidCallback onClearPersonalizedLearningData;
   final VocabularyChangedCallback onVocabularyChanged;
   final Future<void> Function() onPersonalObjectsChanged;
@@ -733,7 +786,335 @@ class HomePage extends StatelessWidget {
         ),
       ),
     );
-    if (updated != null) onExpressionPreferenceChanged(updated);
+    if (updated != null) await onExpressionPreferenceChanged(updated);
+  }
+
+  Future<void> _openSpriteAssistant(BuildContext context) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => SpriteAssistantPage(
+          qwenService: qwenService,
+          onExecute: _executeSpriteAssistantAction,
+        ),
+      ),
+    );
+  }
+
+  Future<SpriteAssistantExecutionResult> _executeSpriteAssistantAction(
+    BuildContext context,
+    SpriteAssistantIntent intent,
+  ) async {
+    switch (intent.actionId) {
+      case SpriteAssistantActionIds.setImageScale:
+        final currentPreference = currentExpressionPreference();
+        final scale = _nearestAssistantImageScale(
+          intent.parameters['imageScale'],
+        );
+        await onExpressionPreferenceChanged(
+          ExpressionPreference(
+            preferredCandidateCount: currentPreference.effectiveCandidateCount,
+            displayMode: currentPreference.displayMode,
+            imageScale: scale,
+          ),
+        );
+        return SpriteAssistantExecutionResult(
+          title: '图片大小已调整',
+          message: '之后补词和对话里的图片会按新大小显示。',
+          undoLabel: '撤销',
+          onUndo: () async {
+            await onExpressionPreferenceChanged(currentPreference);
+            return const SpriteAssistantExecutionResult(
+              title: '已撤销图片大小调整',
+              message: '表达偏好已经恢复到调整前。',
+            );
+          },
+        );
+      case SpriteAssistantActionIds.setCandidateCount:
+        final currentPreference = currentExpressionPreference();
+        final count = _nearestAssistantCandidateCount(
+          intent.parameters['candidateCount'],
+        );
+        await onExpressionPreferenceChanged(
+          ExpressionPreference(
+            preferredCandidateCount: count,
+            displayMode: currentPreference.displayMode,
+            imageScale: currentPreference.effectiveImageScale,
+          ),
+        );
+        return SpriteAssistantExecutionResult(
+          title: '候选数量已调整',
+          message: '之后每次会优先显示 $count 项表达候选。',
+          undoLabel: '撤销',
+          onUndo: () async {
+            await onExpressionPreferenceChanged(currentPreference);
+            return const SpriteAssistantExecutionResult(
+              title: '已撤销候选数量调整',
+              message: '候选数量已经恢复到调整前。',
+            );
+          },
+        );
+      case SpriteAssistantActionIds.addVocabularyEntry:
+        final entry = _assistantVocabularyEntryFromIntent(intent);
+        final currentEntries = currentVocabularyEntries();
+        final normalizedText =
+            LocationRecommendationController.normalizeText(entry.text);
+        final alreadyExists = currentEntries.any(
+          (item) =>
+              item.category == entry.category &&
+              LocationRecommendationController.normalizeText(item.text) ==
+                  normalizedText,
+        );
+        if (alreadyExists) {
+          return SpriteAssistantExecutionResult(
+            title: '词库里已经有了',
+            message: '“${entry.text}”已经在“${entry.category}”分类里，不需要重复添加。',
+          );
+        }
+        await onVocabularyChanged([entry, ...currentEntries]);
+        return SpriteAssistantExecutionResult(
+          title: '已添加到词库',
+          message: '“${entry.text}”已经保存到“${entry.category}”分类。',
+          undoLabel: '撤销',
+          onUndo: () async {
+            final latestEntries = currentVocabularyEntries();
+            await onVocabularyChanged(
+              latestEntries.where((item) => item.id != entry.id).toList(),
+            );
+            return SpriteAssistantExecutionResult(
+              title: '已撤销添加词条',
+              message: '“${entry.text}”已经从词库移除。',
+            );
+          },
+        );
+      case SpriteAssistantActionIds.saveFavoriteExpression:
+        final text = _assistantTextParam(
+          intent.parameters['text'],
+          maxLength: 32,
+        );
+        final previousFavorites = List<String>.of(currentFavoriteExpressions());
+        await onFavoriteSaved(text);
+        return SpriteAssistantExecutionResult(
+          title: '已保存为常用表达',
+          message: '“$text”之后会更容易被你找到。',
+          undoLabel: '撤销',
+          onUndo: () async {
+            await onFavoriteExpressionsChanged(previousFavorites);
+            return SpriteAssistantExecutionResult(
+              title: '已撤销保存常用表达',
+              message: '“$text”已经从本次保存中撤回。',
+            );
+          },
+        );
+      case SpriteAssistantActionIds.openExpressionPreferences:
+        await _openExpressionPreferences(context);
+        return const SpriteAssistantExecutionResult(
+          title: '表达偏好已打开',
+          message: '你可以继续调整图片、文字和候选数量。',
+        );
+      case SpriteAssistantActionIds.openVocabulary:
+        locationController.refreshLocationContext();
+        await Navigator.of(context).push(_buildFeatureRoute(
+          context,
+          YuqiaoFeature.vocabulary,
+        ));
+        return const SpriteAssistantExecutionResult(
+          title: '词库已打开',
+          message: '已经进入我的词库。',
+        );
+      case SpriteAssistantActionIds.openPersonalObjects:
+        await _openPersonalObjects(context);
+        return const SpriteAssistantExecutionResult(
+          title: '个人物品已打开',
+          message: '可以继续添加、查看或管理自己的物品。',
+        );
+      case SpriteAssistantActionIds.openFamilyContact:
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const SpriteAssistantFamilyContactPage(),
+          ),
+        );
+        return const SpriteAssistantExecutionResult(
+          title: '家人联系已打开',
+          message: '家属姓名、电话和求助句可以在这里保存。',
+        );
+      case SpriteAssistantActionIds.openTraining:
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const RehabTrainingPage(),
+          ),
+        );
+        return const SpriteAssistantExecutionResult(
+          title: '词语花园已打开',
+          message: '训练结束后可以回到小精灵继续操作。',
+        );
+      case SpriteAssistantActionIds.openListeningTraining:
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const RehabTrainingPage(
+              initialMode: RehabTrainingMode.listening,
+            ),
+          ),
+        );
+        return const SpriteAssistantExecutionResult(
+          title: '听理解训练已打开',
+          message: '已经进入听一句话再选择的训练线。',
+        );
+      case SpriteAssistantActionIds.openMemory:
+        await _openYuqiaoMemory(context);
+        return const SpriteAssistantExecutionResult(
+          title: '语桥记忆已打开',
+          message: '可以查看系统最近记住了哪些表达习惯。',
+        );
+      case SpriteAssistantActionIds.togglePersonalizedLearning:
+        final previous = personalizedLearningEnabled;
+        final enabled = _assistantBoolParam(intent.parameters['enabled']);
+        await onPersonalizedLearningChanged(enabled);
+        return SpriteAssistantExecutionResult(
+          title: enabled ? '已开启学习记忆' : '已关闭学习记忆',
+          message: enabled ? '系统会继续学习你的表达选择。' : '系统不会继续记录新的表达习惯。',
+          undoLabel: enabled == previous ? null : '撤销',
+          onUndo: enabled == previous
+              ? null
+              : () async {
+                  await onPersonalizedLearningChanged(previous);
+                  return SpriteAssistantExecutionResult(
+                    title: '已撤销学习记忆调整',
+                    message: previous ? '个性化学习记忆已重新开启。' : '个性化学习记忆已恢复为关闭。',
+                  );
+                },
+        );
+      case SpriteAssistantActionIds.toggleAutoStuckDetection:
+        final previous = autoStuckDetectionEnabled;
+        final enabled = _assistantBoolParam(intent.parameters['enabled']);
+        await onAutoStuckDetectionChanged(enabled);
+        return SpriteAssistantExecutionResult(
+          title: enabled ? '已开启自动帮助' : '已关闭自动帮助',
+          message: enabled ? '表达卡住时会更主动地给出提示。' : '之后会减少自动弹出的帮助。',
+          undoLabel: enabled == previous ? null : '撤销',
+          onUndo: enabled == previous
+              ? null
+              : () async {
+                  await onAutoStuckDetectionChanged(previous);
+                  return SpriteAssistantExecutionResult(
+                    title: '已撤销自动帮助调整',
+                    message: previous ? '自动帮助已重新开启。' : '自动帮助已恢复为关闭。',
+                  );
+                },
+        );
+      case SpriteAssistantActionIds.toggleLocationRecommendation:
+        final previous = locationController.enabled;
+        final enabled = _assistantBoolParam(intent.parameters['enabled']);
+        await locationController.setEnabled(enabled);
+        return SpriteAssistantExecutionResult(
+          title: enabled ? '已开启地点推荐' : '已关闭地点推荐',
+          message: enabled ? '系统会继续根据地点整理场景表达。' : '地点场景推荐已暂停。',
+          undoLabel: enabled == previous ? null : '撤销',
+          onUndo: enabled == previous
+              ? null
+              : () async {
+                  await locationController.setEnabled(previous);
+                  return SpriteAssistantExecutionResult(
+                    title: '已撤销地点推荐调整',
+                    message: previous ? '地点场景推荐已重新开启。' : '地点场景推荐已恢复为关闭。',
+                  );
+                },
+        );
+      default:
+        throw const QwenException('小精灵暂时不能执行这个操作。');
+    }
+  }
+
+  double _nearestAssistantImageScale(Object? value) {
+    if (value is! num) {
+      throw const QwenException('缺少有效的图片大小设置。');
+    }
+    final raw = value.toDouble();
+    const options = [0.9, 1.0, 1.25, 1.55];
+    return options.reduce(
+      (best, item) => (item - raw).abs() < (best - raw).abs() ? item : best,
+    );
+  }
+
+  int _nearestAssistantCandidateCount(Object? value) {
+    if (value is! num) {
+      throw const QwenException('缺少有效的候选数量设置。');
+    }
+    final raw = value.round();
+    const options = [2, 4, 6];
+    return options.reduce(
+      (best, item) => (item - raw).abs() < (best - raw).abs() ? item : best,
+    );
+  }
+
+  bool _assistantBoolParam(Object? value) {
+    if (value is bool) return value;
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      if (['true', '1', 'yes', 'on', 'open', '开启'].contains(normalized)) {
+        return true;
+      }
+      if (['false', '0', 'no', 'off', 'close', '关闭'].contains(normalized)) {
+        return false;
+      }
+    }
+    throw const QwenException('缺少明确的开启或关闭设置。');
+  }
+
+  VocabularyEntry _assistantVocabularyEntryFromIntent(
+    SpriteAssistantIntent intent,
+  ) {
+    final text = _assistantTextParam(
+      intent.parameters['text'],
+      maxLength: 12,
+    );
+    final category = _assistantVocabularyCategory(
+      intent.parameters['category'],
+      text,
+    );
+    return VocabularyEntry(
+      id: 'assistant_${DateTime.now().microsecondsSinceEpoch}',
+      category: category,
+      text: text,
+      note: '小精灵添加',
+    );
+  }
+
+  String _assistantTextParam(Object? value, {required int maxLength}) {
+    final text = value
+            ?.toString()
+            .replaceAll(RegExp(r'^[“”"‘’\s]+|[“”"‘’\s]+$'), '')
+            .trim() ??
+        '';
+    if (text.isEmpty) {
+      throw const QwenException('小精灵还缺少要保存的文字。');
+    }
+    if (text.length > maxLength) {
+      throw QwenException('这段文字有点长，请缩短到 $maxLength 个字以内。');
+    }
+    return text;
+  }
+
+  String _assistantVocabularyCategory(Object? value, String text) {
+    const categories = ['人物', '饮食', '地点', '活动', '物品', '感受', '常用句'];
+    final raw = value?.toString().trim() ?? '';
+    if (categories.contains(raw)) return raw;
+    if (RegExp(r'(爸爸|妈妈|医生|护士|家人|朋友|老师|同学|儿子|女儿)').hasMatch(text)) {
+      return '人物';
+    }
+    if (RegExp(r'(水|饭|粥|面|水果|牛奶|茶|药|包子|饺子|汤)').hasMatch(text)) {
+      return '饮食';
+    }
+    if (RegExp(r'(医院|家|超市|厕所|卫生间|公园|药房|病房|厨房)').hasMatch(text)) {
+      return '地点';
+    }
+    if (RegExp(r'(疼|累|冷|热|饿|渴|不舒服|头晕|害怕|着急)').hasMatch(text)) {
+      return '感受';
+    }
+    if (text.length >= 4 || RegExp(r'(请|我想|帮我|不要|需要)').hasMatch(text)) {
+      return '常用句';
+    }
+    return '物品';
   }
 
   @override
@@ -756,6 +1137,7 @@ class HomePage extends StatelessWidget {
       locationController: locationController, // TODO: 调试用，以后删除
       onFavoriteSaved: onFavoriteSaved,
       onStarPhraseSpoken: onExpressionCompleted,
+      onStarLongPress: () => _openSpriteAssistant(context),
       onOpenYuqiaoMemory: () => _openYuqiaoMemory(context),
       onOpenPersonalObjects: () => _openPersonalObjects(context),
       onStuck: () {
@@ -4271,6 +4653,7 @@ class _ConversationModePageState extends State<ConversationModePage>
   String? _lastStuckTriggerText;
   String? _lastSpeechRepairText;
   _PendingSpeechRepair? _pendingSpeechRepair;
+  CompanionActionPlan? _activeSuggestionActionPlan;
   String _conversationSummary = '';
   String _currentTranscript = '';
   String _status = '对话模式未开启';
@@ -5095,6 +5478,27 @@ class _ConversationModePageState extends State<ConversationModePage>
       ...feedbackProfile.rejectedCandidates,
       ...excludedCandidates,
     }.toList();
+    _syncCompanionConversationContext();
+    List<String> personalizedHints = const [];
+    try {
+      final slot = RecommendationContext.inferSlot(_latestUserFragment);
+      _activeSuggestionActionPlan = await widget.companionAgent.adaptivePlanFor(
+        feature: 'conversation',
+        prompt: _latestUserFragment,
+        slot: slot,
+        userRequested: true,
+      );
+      personalizedHints = await widget.companionAgent.personalizedPromptHints(
+        feature: 'conversation',
+        prompt: _latestUserFragment,
+        slot: slot,
+        limit: 8,
+      );
+    } catch (error) {
+      _activeSuggestionActionPlan = null;
+      yuqiaoDebugLog('[Qwen conversation] adaptive plan skipped: $error');
+    }
+    if (!mounted) return;
     _conversationSuggestionToken?.cancel();
     final token = QwenCancellationToken();
     _conversationSuggestionToken = token;
@@ -5123,6 +5527,7 @@ class _ConversationModePageState extends State<ConversationModePage>
                   category: 'conversation',
                   limit: 8,
                 ).map((habit) => '常用${habit.count}次：${habit.text}'),
+                ...personalizedHints,
                 ..._savedConversationTerms.take(8).map((term) =>
                     '${conversationTermTypeLabel(term.type)}：${term.text}'),
                 ...widget.favoriteExpressions,
@@ -5444,7 +5849,8 @@ class _ConversationModePageState extends State<ConversationModePage>
         DateTime.now().add(const Duration(seconds: 30));
   }
 
-  void _chooseSuggestion(String suggestion) {
+  Future<void> _chooseSuggestion(String suggestion) async {
+    final actionPlan = _activeSuggestionActionPlan;
     unawaited(_conversationFeedbackStore.recordAccepted(
       contextKey: _feedbackContextKey,
       candidate: suggestion,
@@ -5456,6 +5862,15 @@ class _ConversationModePageState extends State<ConversationModePage>
       prompt: _latestUserFragment,
       slot: RecommendationContext.inferSlot(_latestUserFragment),
     ));
+    if (actionPlan != null) {
+      unawaited(widget.companionAgent.recordActionPlanFeedback(
+        type: actionPlan.type,
+        feature: 'conversation',
+        action: CompanionFeedbackAction.accepted,
+        prompt: _latestUserFragment,
+        slot: RecommendationContext.inferSlot(_latestUserFragment),
+      ));
+    }
     final separator = suggestion.indexOf(RegExp(r'[：:]'));
     final suggestionType =
         separator > 0 ? suggestion.substring(0, separator).trim() : '继续表达';
@@ -5470,6 +5885,18 @@ class _ConversationModePageState extends State<ConversationModePage>
         source: 'conversation_candidate',
       ),
     );
+    List<String> sentenceHints = const [];
+    try {
+      sentenceHints = await widget.companionAgent.personalizedPromptHints(
+        feature: 'conversation',
+        prompt: _latestUserFragment,
+        slot: RecommendationSlot.sentence,
+        limit: 8,
+      );
+    } catch (error) {
+      yuqiaoDebugLog('[Qwen conversation] sentence hints skipped: $error');
+    }
+    if (!mounted) return;
     final draft = ExpressionDraft(
       source: '对话模式',
       intent: '表达中断补词',
@@ -5478,6 +5905,7 @@ class _ConversationModePageState extends State<ConversationModePage>
         '用户最后表达：$_latestUserFragment',
         '用户选择的补充类型：$suggestionType',
         '用户确认的补充内容：$suggestionText',
+        ...sentenceHints.map((hint) => '智能体提示：$hint'),
       ],
     );
     Navigator.of(context).push(
@@ -5504,6 +5932,13 @@ class _ConversationModePageState extends State<ConversationModePage>
               prompt: _latestUserFragment,
               slot: RecommendationContext.inferSlot(_latestUserFragment),
             ));
+            unawaited(widget.companionAgent.recordActionPlanFeedback(
+              type: CompanionActionType.recommendSentence,
+              feature: 'conversation',
+              action: CompanionFeedbackAction.accepted,
+              prompt: _latestUserFragment,
+              slot: RecommendationSlot.sentence,
+            ));
           },
           onCandidateSaved: (text) async {
             unawaited(widget.companionAgent.recordInteraction(
@@ -5521,6 +5956,13 @@ class _ConversationModePageState extends State<ConversationModePage>
               action: CompanionFeedbackAction.rejected,
               prompt: _latestUserFragment,
               slot: RecommendationContext.inferSlot(_latestUserFragment),
+            );
+            await widget.companionAgent.recordActionPlanFeedback(
+              type: CompanionActionType.recommendSentence,
+              feature: 'conversation',
+              action: CompanionFeedbackAction.rejected,
+              prompt: _latestUserFragment,
+              slot: RecommendationSlot.sentence,
             );
           },
           onExpressionCompleted: widget.onExpressionCompleted,
@@ -5752,8 +6194,9 @@ class _ConversationModePageState extends State<ConversationModePage>
                                               onTap: () {
                                                 Navigator.of(dialogContext)
                                                     .pop();
-                                                _chooseSuggestion(
-                                                    suggestions[index]);
+                                                unawaited(_chooseSuggestion(
+                                                  suggestions[index],
+                                                ));
                                               },
                                             );
                                           },
@@ -5780,6 +6223,22 @@ class _ConversationModePageState extends State<ConversationModePage>
                                                 _latestUserFragment,
                                               ),
                                             ));
+                                            final actionPlan =
+                                                _activeSuggestionActionPlan;
+                                            if (actionPlan != null) {
+                                              unawaited(widget.companionAgent
+                                                  .recordActionPlanFeedback(
+                                                type: actionPlan.type,
+                                                feature: 'conversation',
+                                                action: CompanionFeedbackAction
+                                                    .refreshed,
+                                                prompt: _latestUserFragment,
+                                                slot: RecommendationContext
+                                                    .inferSlot(
+                                                  _latestUserFragment,
+                                                ),
+                                              ));
+                                            }
                                             Navigator.of(dialogContext).pop();
                                             unawaited(_suggestFromContext(
                                               excludedCandidates: rejected,
@@ -7850,1627 +8309,6 @@ class _TranscriptGlowPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-class StuckFlowPage extends StatefulWidget {
-  const StuckFlowPage({
-    super.key,
-    required this.qwenService,
-    required this.locationController,
-    required this.companionAgent,
-    required this.personalizedLearningEnabled,
-    required this.vocabularyEntries,
-    required this.expressionHabits,
-    this.preferredCandidateCount = 4,
-    this.candidateImageScale = 1.0,
-    required this.featureLauncher,
-    required this.onHabitRecorded,
-    required this.onExpressionCompleted,
-    required this.onFavoriteSaved,
-  });
-
-  final QwenService qwenService;
-  final LocationRecommendationController locationController;
-  final CompanionAgentController companionAgent;
-  final bool personalizedLearningEnabled;
-  final List<VocabularyEntry> vocabularyEntries;
-  final List<ExpressionHabit> expressionHabits;
-  final int preferredCandidateCount;
-  final double candidateImageScale;
-  final YuqiaoFeatureLauncher featureLauncher;
-  final HabitRecordCallback onHabitRecorded;
-  final ExpressionCallback onExpressionCompleted;
-  final ExpressionCallback onFavoriteSaved;
-
-  @override
-  State<StuckFlowPage> createState() => _GuidedStuckFlowPageState();
-}
-
-class _GuidedStuckFlowPageState extends State<StuckFlowPage> {
-  final ParaformerAsrService _fragmentAsrService = ParaformerAsrService();
-  StuckExpressionSession? _session;
-  List<StuckCandidate> _visibleCandidates = const [];
-  final Set<String> _seenCandidates = {};
-  QwenCancellationToken? _recommendationToken;
-  String _seedFragment = '';
-  bool _isRecommending = false;
-  bool _isRefreshing = false;
-  bool _isHandlingBack = false;
-  bool _isExitingCompletedFlow = false;
-  int _recommendationRequestId = 0;
-  int _refreshAttempts = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    widget.locationController.refreshLocationContext();
-  }
-
-  @override
-  void dispose() {
-    _recommendationToken?.cancel();
-    unawaited(_fragmentAsrService.dispose());
-    super.dispose();
-  }
-
-  String get _timeContext {
-    final now = DateTime.now();
-    final period = switch (now.hour) {
-      >= 5 && < 11 => '早上',
-      >= 11 && < 14 => '中午',
-      >= 14 && < 18 => '下午',
-      >= 18 && < 24 => '晚上',
-      _ => '深夜',
-    };
-    return '$period ${now.hour.toString().padLeft(2, '0')}:'
-        '${now.minute.toString().padLeft(2, '0')}';
-  }
-
-  String get _locationContext {
-    if (!widget.locationController.enabled) return '未开启地点推荐';
-    final place = widget.locationController.currentPlace;
-    if (place != null) return place.typeLabel;
-    final semantic = widget.locationController.currentSemantic;
-    return semantic == null ? '未知地点' : PlaceTypeCatalog.labelOf(semantic.type);
-  }
-
-  void _chooseIntent(StuckExpressionIntent intent) {
-    setState(() {
-      _session = StuckExpressionSession(
-        intent: intent,
-        seedFragment: _seedFragment,
-      );
-      _resetStepState();
-    });
-    unawaited(_recommendCurrentStep());
-  }
-
-  void _resetStepState() {
-    _recommendationRequestId++;
-    _recommendationToken?.cancel();
-    _visibleCandidates = const [];
-    _seenCandidates.clear();
-    _refreshAttempts = 0;
-    _isRecommending = false;
-    _isRefreshing = false;
-  }
-
-  Future<void> _chooseCandidate(StuckCandidate candidate) async {
-    final session = _session;
-    if (session == null) return;
-    unawaited(
-      widget.locationController.recordWordUsed(candidate.text, 'stuck'),
-    );
-    unawaited(
-      widget.onHabitRecorded(
-        candidate.text,
-        category: 'stuck',
-        source: 'stuck_candidate',
-      ),
-    );
-    unawaited(widget.companionAgent.recordInteraction(
-      text: candidate.text,
-      feature: 'stuck',
-      action: CompanionFeedbackAction.accepted,
-      prompt: session.currentStep?.title ?? session.intent.sentenceIntent,
-      slot: _locationSlotFor(candidate.slot),
-    ));
-    setState(() {
-      session.select(candidate);
-      _resetStepState();
-    });
-    if (session.currentStep != null) {
-      await _recommendCurrentStep();
-    }
-  }
-
-  Future<void> _skipCurrentStep() async {
-    final session = _session;
-    final step = session?.currentStep;
-    if (session == null || step?.optional != true) return;
-    _recordVisibleCandidateFeedback(
-      session: session,
-      step: step!,
-      action: CompanionFeedbackAction.skipped,
-    );
-    setState(() {
-      session.skipCurrent();
-      _resetStepState();
-    });
-    if (session.currentStep != null) {
-      await _recommendCurrentStep();
-    }
-  }
-
-  Future<void> _editFrom(StuckExpressionSlot slot) async {
-    final session = _session;
-    if (session == null) return;
-    setState(() {
-      session.clearFrom(slot);
-      _resetStepState();
-    });
-    await _recommendCurrentStep();
-  }
-
-  Future<void> _goBackWithinFlow() async {
-    if (!mounted || _isHandlingBack) return;
-    _isHandlingBack = true;
-    try {
-      final session = _session;
-      if (session == null) {
-        _recommendationToken?.cancel();
-        await _fragmentAsrService.stop();
-        if (!mounted) return;
-        Navigator.of(context).pop();
-        return;
-      }
-      final selections = session.selections;
-      if (selections.isNotEmpty) {
-        await _editFrom(selections.last.slot);
-        return;
-      }
-      _recommendationToken?.cancel();
-      setState(() {
-        _session = null;
-        _resetStepState();
-      });
-    } finally {
-      _isHandlingBack = false;
-    }
-  }
-
-  Future<void> _finishExpression() async {
-    final session = _session;
-    if (session == null || !session.canFinish) return;
-    final keywords = <String>[
-      if (session.seedFragment.trim().isNotEmpty)
-        '用户记得的片段：${session.seedFragment.trim()}',
-      ...session.selections.map(
-        (selection) => '已确认${selection.slot.label}：${selection.candidate.text}',
-      ),
-    ];
-    final draft = ExpressionDraft(
-      source: '独立补词',
-      intent: session.intent.sentenceIntent,
-      keywords: keywords,
-    );
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => AiCandidatesPage(
-          draft: draft,
-          qwenService: widget.qwenService,
-          personalizedLearningEnabled: widget.personalizedLearningEnabled,
-          onExitFlow: _exitCompletedFlow,
-          onCandidateSelected: (text) async {
-            unawaited(widget.locationController.recordWordUsed(text, 'stuck'));
-            unawaited(
-              widget.onHabitRecorded(
-                text,
-                category: 'stuck',
-                source: 'stuck_sentence_candidate',
-              ),
-            );
-            unawaited(widget.companionAgent.recordInteraction(
-              text: text,
-              feature: 'stuck',
-              action: CompanionFeedbackAction.accepted,
-              prompt: session.intent.sentenceIntent,
-              slot: RecommendationSlot.sentence,
-            ));
-          },
-          onCandidateSaved: (text) async {
-            unawaited(widget.companionAgent.recordInteraction(
-              text: text,
-              feature: 'stuck',
-              action: CompanionFeedbackAction.saved,
-              prompt: session.intent.sentenceIntent,
-              slot: RecommendationSlot.sentence,
-            ));
-          },
-          onCandidatesRejected: (sentences) async {
-            await widget.companionAgent.recordRejectedBatch(
-              texts: sentences,
-              feature: 'stuck',
-              action: CompanionFeedbackAction.rejected,
-              prompt: session.intent.sentenceIntent,
-              slot: RecommendationSlot.sentence,
-            );
-          },
-          onExpressionCompleted: widget.onExpressionCompleted,
-          onFavoriteSaved: widget.onFavoriteSaved,
-        ),
-      ),
-    );
-  }
-
-  void _exitCompletedFlow() {
-    if (!mounted || _isExitingCompletedFlow) return;
-    _isExitingCompletedFlow = true;
-    final flowRoute = ModalRoute.of(context);
-    if (flowRoute == null) {
-      Navigator.of(context).pop();
-      return;
-    }
-    final navigator = Navigator.of(context);
-    navigator.popUntil((route) => identical(route, flowRoute));
-    navigator.pop();
-  }
-
-  Future<void> _recommendCurrentStep({
-    bool forceRefresh = false,
-    int diversificationLevel = 0,
-  }) async {
-    final session = _session;
-    final step = session?.currentStep;
-    if (session == null || step == null) return;
-    final requestId = ++_recommendationRequestId;
-    _recommendationToken?.cancel();
-    final token = QwenCancellationToken();
-    _recommendationToken = token;
-    final startedAt = DateTime.now();
-    setState(() {
-      _isRecommending = true;
-      if (!forceRefresh) _visibleCandidates = const [];
-    });
-
-    final localCandidates = _localCandidates(step);
-    List<StuckCandidate> modelCandidates = const [];
-    try {
-      modelCandidates = await widget.qwenService
-          .recommendGuidedOptions(
-            CandidateRecommendationRequest(
-              intent: session.intent.sentenceIntent,
-              stepTitle: step.title,
-              slotKey: step.slot.key,
-              slotLabel: step.slot.label,
-              timeText: _timeContext,
-              locationText: _locationContext,
-              selectedKeywords: [
-                if (session.seedFragment.isNotEmpty)
-                  '记得的片段：${session.seedFragment}',
-                ...session.selections.map(
-                  (selection) =>
-                      '${selection.slot.label}：${selection.candidate.text}',
-                ),
-              ],
-              fallbackOptions:
-                  localCandidates.map((candidate) => candidate.text).toList(),
-              personalWords: _personalWordsForStep(step),
-              excludeOptions: _seenCandidates.toList(),
-              displayCount: widget.preferredCandidateCount.clamp(2, 6).toInt(),
-              diversificationLevel: diversificationLevel,
-            ),
-            cancellationToken: token,
-          )
-          .timeout(const Duration(seconds: 6));
-    } catch (error) {
-      final cancelled = token.isCancelled || error is QwenCancelledException;
-      token.cancel();
-      if (!cancelled) {
-        yuqiaoDebugLog('[StuckFlow] Qwen candidate fallback: $error');
-      }
-    }
-    if (!mounted || requestId != _recommendationRequestId) return;
-
-    // 首次 TLS 连接和模型冷启动可能超过 5 秒，不能过早伪装成模型推荐。
-    if (modelCandidates.isEmpty && !forceRefresh) {
-      final elapsed = DateTime.now().difference(startedAt);
-      const fallbackDelay = Duration(seconds: 5);
-      if (elapsed < fallbackDelay) {
-        await Future<void>.delayed(fallbackDelay - elapsed);
-      }
-    }
-    if (!mounted || requestId != _recommendationRequestId) return;
-
-    final merged = await _mergeCandidatePool(
-      modelCandidates: modelCandidates,
-      localCandidates: localCandidates,
-      step: step,
-    );
-    if (!mounted || requestId != _recommendationRequestId) return;
-    final next = _takeDiverseCandidates(merged, step);
-    yuqiaoDebugLog(
-      '[StuckFlow] source=${modelCandidates.isEmpty ? 'local-fallback' : 'qwen'} '
-      'elapsedMs=${DateTime.now().difference(startedAt).inMilliseconds} '
-      'context=${session.selections.map((item) => item.candidate.text).join('/')} '
-      'seed=${session.seedFragment}',
-    );
-    setState(() {
-      _visibleCandidates = next;
-      _isRecommending = false;
-      _isRefreshing = false;
-    });
-    if (next.isEmpty) {
-      await _showClarificationSheet();
-    }
-  }
-
-  List<StuckCandidate> _localCandidates(StuckStepDefinition step) {
-    final result = <StuckCandidate>[];
-    final seen = <String>{};
-    for (final entry in widget.vocabularyEntries) {
-      if (!step.vocabularyCategories.contains(entry.category)) continue;
-      final normalized =
-          LocationRecommendationController.normalizeText(entry.text);
-      if (normalized.isEmpty || !seen.add(normalized)) continue;
-      result.add(StuckCandidate(
-        text: entry.text,
-        semanticGroup: entry.category,
-        slot: step.slot,
-      ));
-    }
-    for (final candidate in step.options) {
-      final normalized =
-          LocationRecommendationController.normalizeText(candidate.text);
-      if (seen.add(normalized)) result.add(candidate);
-    }
-    return result;
-  }
-
-  List<String> _personalWordsForStep(StuckStepDefinition step) {
-    final habitWords = ExpressionHabitStore.rank(
-      widget.expressionHabits,
-      category: 'stuck',
-      limit: 12,
-    ).map((habit) => '常用${habit.count}次：${habit.text}');
-    return [
-      ...habitWords,
-      ...widget.vocabularyEntries
-          .where((entry) => step.vocabularyCategories.contains(entry.category))
-          .map((entry) => '${entry.category}：${entry.text}'),
-    ].take(24).toList();
-  }
-
-  Future<List<StuckCandidate>> _mergeCandidatePool({
-    required List<StuckCandidate> modelCandidates,
-    required List<StuckCandidate> localCandidates,
-    required StuckStepDefinition step,
-  }) async {
-    final valid = <StuckCandidate>[];
-    final seen = <String>{};
-    for (final candidate in [...modelCandidates, ...localCandidates]) {
-      if (candidate.slot != step.slot ||
-          !StuckFlowCatalog.isPlausibleCandidate(
-            candidate.slot,
-            candidate.text,
-          )) {
-        continue;
-      }
-      final normalized =
-          LocationRecommendationController.normalizeText(candidate.text);
-      if (normalized.isEmpty ||
-          _seenCandidates.contains(normalized) ||
-          !seen.add(normalized)) {
-        continue;
-      }
-      valid.add(candidate);
-    }
-
-    final rankedWords = widget.locationController.recommendWords(
-      valid.map((candidate) => candidate.text).toList(),
-      category: 'stuck',
-      includeContextWords: true,
-      context: _recommendationContext(step),
-    );
-    final locationRank = <String, int>{
-      for (var index = 0; index < rankedWords.length; index++)
-        LocationRecommendationController.normalizeText(rankedWords[index]):
-            index,
-    };
-    final recommendationContext = _recommendationContext(step);
-    final selectedWords = recommendationContext.selectedWords;
-    List<String> companionRankedWords = const [];
-    try {
-      companionRankedWords = await widget.companionAgent.rankExpressions(
-        valid.map((candidate) => candidate.text).toList(),
-        feature: recommendationContext.feature,
-        category: 'stuck',
-        prompt: recommendationContext.prompt,
-        slot: recommendationContext.slot,
-        selectedWords: selectedWords,
-        allowContextExpansion: recommendationContext.allowContextExpansion,
-        limit: valid.length,
-      );
-    } catch (error) {
-      yuqiaoDebugLog('[StuckFlow] companion ranking skipped: $error');
-    }
-    final companionRank = <String, int>{
-      for (var index = 0; index < companionRankedWords.length; index++)
-        LocationRecommendationController.normalizeText(
-          companionRankedWords[index],
-        ): index,
-    };
-    final baseIndex = <String, int>{
-      for (var index = 0; index < valid.length; index++)
-        LocationRecommendationController.normalizeText(valid[index].text):
-            index,
-    };
-    valid.sort((a, b) {
-      double scoreOf(StuckCandidate candidate) {
-        final normalized =
-            LocationRecommendationController.normalizeText(candidate.text);
-        final sourceScore = candidate.isModelGenerated ? 1000.0 : 600.0;
-        final orderScore = 120.0 - (baseIndex[normalized] ?? 12) * 8;
-        final contextScore =
-            math.max(0, 20 - (locationRank[normalized] ?? 20)).toDouble();
-        final companionScore =
-            math.max(0, 24 - (companionRank[normalized] ?? 24)).toDouble();
-        return sourceScore + orderScore + contextScore + companionScore;
-      }
-
-      return scoreOf(b).compareTo(scoreOf(a));
-    });
-
-    final contextualSupplements = <StuckCandidate>[];
-    final validNormalized = valid
-        .map((candidate) =>
-            LocationRecommendationController.normalizeText(candidate.text))
-        .toSet();
-    for (final word in rankedWords) {
-      final normalized = LocationRecommendationController.normalizeText(word);
-      if (validNormalized.contains(normalized)) continue;
-      final contextual = _contextCandidate(word, step);
-      if (contextual != null &&
-          !_seenCandidates.contains(normalized) &&
-          !contextualSupplements.any((item) =>
-              LocationRecommendationController.normalizeText(item.text) ==
-              normalized)) {
-        // 地点和历史词只做补位，不插到模型及当前步骤候选之前。
-        contextualSupplements.add(contextual);
-      }
-    }
-    return [...valid, ...contextualSupplements.take(2)].take(16).toList();
-  }
-
-  RecommendationContext _recommendationContext(StuckStepDefinition step) {
-    final session = _session!;
-    return RecommendationContext(
-      feature: 'stuck',
-      intent: session.intent.sentenceIntent,
-      prompt: step.title,
-      slot: _locationSlotFor(step.slot),
-      selectedWords: session.selections
-          .map((selection) => selection.candidate.text)
-          .toList(),
-      allowContextExpansion: true,
-    );
-  }
-
-  RecommendationSlot _locationSlotFor(StuckExpressionSlot slot) {
-    return switch (slot) {
-      StuckExpressionSlot.helper => RecommendationSlot.person,
-      StuckExpressionSlot.communication => RecommendationSlot.sentence,
-      StuckExpressionSlot.place => RecommendationSlot.place,
-      StuckExpressionSlot.time => RecommendationSlot.time,
-      StuckExpressionSlot.bodyPart => RecommendationSlot.bodyPart,
-      StuckExpressionSlot.feeling ||
-      StuckExpressionSlot.degree =>
-        RecommendationSlot.feeling,
-      StuckExpressionSlot.action => RecommendationSlot.actionOrObject,
-      StuckExpressionSlot.target ||
-      StuckExpressionSlot.object ||
-      StuckExpressionSlot.subject =>
-        RecommendationSlot.actionOrObject,
-      StuckExpressionSlot.detail => RecommendationSlot.actionOrObject,
-    };
-  }
-
-  StuckCandidate? _contextCandidate(
-    String text,
-    StuckStepDefinition step,
-  ) {
-    final clean = text.trim();
-    if (clean.isEmpty || clean.length > 18) return null;
-    final fits = switch (step.slot) {
-      StuckExpressionSlot.place =>
-        RegExp(r'家|医院|超市|学校|公园|药店|餐厅|公司|小区|楼|房间|厕所|车站|地铁|这里|外面')
-            .hasMatch(clean),
-      StuckExpressionSlot.time =>
-        RegExp(r'现在|刚才|今天|明天|昨天|早上|晚上|一会|最近|一直').hasMatch(clean),
-      StuckExpressionSlot.bodyPart =>
-        RegExp(r'头|肩|手|胸|肚|腰|腿|脚|背|喉咙').hasMatch(clean),
-      StuckExpressionSlot.feeling =>
-        RegExp(r'累|疼|痛|冷|热|怕|难过|高兴|着急|晕|麻|恶心').hasMatch(clean),
-      StuckExpressionSlot.degree =>
-        RegExp(r'一点|比较|很|严重|明显|越来越').hasMatch(clean),
-      StuckExpressionSlot.action =>
-        RegExp(r'找|拿|打开|关|去|回|吃|喝|休息|陪|说|看|买|用').hasMatch(clean),
-      StuckExpressionSlot.helper =>
-        RegExp(r'妈妈|爸爸|家人|朋友|老师|医生|护士|工作人员|同事').hasMatch(clean),
-      StuckExpressionSlot.communication =>
-        RegExp(r'帮我|请|你|哪里|怎么|自己|不用').hasMatch(clean),
-      StuckExpressionSlot.detail => clean.length <= 8,
-      // 泛化的历史名词容易污染对象槽位，只允许已按词库分类加入的对象。
-      StuckExpressionSlot.target ||
-      StuckExpressionSlot.object ||
-      StuckExpressionSlot.subject =>
-        false,
-    };
-    if (!fits) return null;
-    return StuckCandidate(
-      text: clean,
-      semanticGroup: '个人常用',
-      slot: step.slot,
-    );
-  }
-
-  String _candidateMeaningKey(StuckCandidate candidate) {
-    var normalized = LocationRecommendationController.normalizeText(
-      candidate.text,
-    );
-    normalized = normalized
-        .replaceAll(RegExp(r'^(我想|我要|请|麻烦|能不能|可以|帮我|给我|把)'), '')
-        .replaceAll(RegExp(r'(一下|一点|可以吗|好吗|吗)$'), '')
-        .trim();
-    if (normalized.isEmpty) normalized = candidate.text.trim();
-
-    final synonymGroups = <String, List<String>>{
-      'get_object': ['拿', '取', '递', '给我', '带来', '找给我'],
-      'find_object': ['找', '寻找', '找不到', '在哪里', '哪儿', '哪'],
-      'drink_water': ['喝水', '水杯', '水瓶', '口渴', '倒水'],
-      'eat_food': ['吃饭', '吃东西', '饭', '饿', '点餐'],
-      'rest': ['休息', '坐一会', '躺', '睡觉', '太累'],
-      'toilet': ['厕所', '卫生间', '上厕所'],
-      'pain': ['疼', '痛', '不舒服', '难受'],
-      'repeat': ['再说', '重复', '没听清', '慢一点'],
-      'family': ['妈妈', '爸爸', '家人', '朋友'],
-      'medical_staff': ['医生', '护士', '治疗师'],
-      'pay': ['付款', '缴费', '结账', '买单', '多少钱'],
-      'go_home': ['回家', '回去', '到家'],
-    };
-    for (final entry in synonymGroups.entries) {
-      if (entry.value.any(normalized.contains)) {
-        return '${candidate.slot.name}:${entry.key}';
-      }
-    }
-
-    final compact =
-        normalized.length <= 4 ? normalized : normalized.substring(0, 4);
-    return '${candidate.slot.name}:$compact';
-  }
-
-  List<StuckCandidate> _takeDiverseCandidates(
-    List<StuckCandidate> pool,
-    StuckStepDefinition step,
-  ) {
-    final result = <StuckCandidate>[];
-    final targetCount = widget.preferredCandidateCount.clamp(2, 6).toInt();
-    final groups = <String>{};
-    final selectedTexts = <String>{};
-    final selectedMeanings = <String>{};
-    final normalizedSeen = _seenCandidates
-        .map(LocationRecommendationController.normalizeText)
-        .toSet();
-
-    bool addCandidate(
-      StuckCandidate candidate, {
-      required bool requireNewGroup,
-      required bool requireNewMeaning,
-    }) {
-      final normalized =
-          LocationRecommendationController.normalizeText(candidate.text);
-      final meaningKey = _candidateMeaningKey(candidate);
-      if (candidate.slot != step.slot ||
-          normalizedSeen.contains(normalized) ||
-          selectedTexts.contains(normalized) ||
-          (requireNewMeaning && selectedMeanings.contains(meaningKey)) ||
-          (requireNewGroup && groups.contains(candidate.semanticGroup))) {
-        return false;
-      }
-      groups.add(candidate.semanticGroup);
-      selectedTexts.add(normalized);
-      selectedMeanings.add(meaningKey);
-      result.add(candidate);
-      return result.length == targetCount;
-    }
-
-    // 第一轮优先使用真正的模型结果；本地词只在模型不足时补位。
-    for (final candidate in pool.where((item) => item.isModelGenerated)) {
-      if (addCandidate(
-        candidate,
-        requireNewGroup: true,
-        requireNewMeaning: true,
-      )) {
-        return result;
-      }
-    }
-    // 模型偶尔会复用 semanticGroup。此时优先保留其上下文候选，
-    // 不要为了凑齐四种标签而立即回填无关的本地模板。
-    for (final candidate in pool.where((item) => item.isModelGenerated)) {
-      if (addCandidate(
-        candidate,
-        requireNewGroup: false,
-        requireNewMeaning: true,
-      )) {
-        return result;
-      }
-    }
-    for (final candidate in pool) {
-      if (addCandidate(
-        candidate,
-        requireNewGroup: true,
-        requireNewMeaning: true,
-      )) {
-        return result;
-      }
-    }
-    for (final candidate in pool) {
-      if (addCandidate(
-        candidate,
-        requireNewGroup: false,
-        requireNewMeaning: false,
-      )) {
-        return result;
-      }
-    }
-    return result;
-  }
-
-  Future<void> _refreshOptions() async {
-    final session = _session;
-    final step = session?.currentStep;
-    if (session == null || step == null || _isRecommending || _isRefreshing) {
-      return;
-    }
-    _recordVisibleCandidateFeedback(
-      session: session,
-      step: step,
-      action: CompanionFeedbackAction.refreshed,
-    );
-    _seenCandidates.addAll(
-      _visibleCandidates.map(
-        (candidate) =>
-            LocationRecommendationController.normalizeText(candidate.text),
-      ),
-    );
-    _refreshAttempts++;
-    setState(() => _isRefreshing = true);
-    await _recommendCurrentStep(
-      forceRefresh: true,
-      diversificationLevel: _refreshAttempts,
-    );
-  }
-
-  void _recordVisibleCandidateFeedback({
-    required StuckExpressionSession session,
-    required StuckStepDefinition step,
-    required CompanionFeedbackAction action,
-  }) {
-    final texts = _visibleCandidates
-        .map((candidate) => candidate.text.trim())
-        .where((text) => text.isNotEmpty)
-        .toSet()
-        .toList(growable: false);
-    if (texts.isEmpty) return;
-    unawaited(widget.companionAgent.recordRejectedBatch(
-      texts: texts,
-      feature: 'stuck',
-      action: action,
-      prompt: step.title.isEmpty ? session.intent.sentenceIntent : step.title,
-      slot: _locationSlotFor(step.slot),
-    ));
-  }
-
-  Future<void> _showClarificationSheet() async {
-    if (!mounted) return;
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (sheetContext) => SafeArea(
-        top: false,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-          decoration: const BoxDecoration(
-            color: Color(0xFFFDFDFE),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 42,
-                  height: 5,
-                  decoration: BoxDecoration(
-                    color: AppColors.divider,
-                    borderRadius: BorderRadius.circular(99),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 18),
-              const Text('换个方式找一找', style: AppTextStyles.sectionTitle),
-              const SizedBox(height: 6),
-              const Text(
-                '连续换组仍不合适时，补充一个字或修改前面的选择会更准确。',
-                style: AppTextStyles.subtitle,
-              ),
-              const SizedBox(height: 16),
-              _ClarificationAction(
-                icon: Icons.keyboard_alt_outlined,
-                label: '输入一个字或词',
-                onTap: () => Navigator.of(sheetContext).pop('type'),
-              ),
-              _ClarificationAction(
-                icon: Icons.mic_rounded,
-                label: '语音说出一部分',
-                onTap: () => Navigator.of(sheetContext).pop('voice'),
-              ),
-              _ClarificationAction(
-                icon: Icons.undo_rounded,
-                label: '返回上一步修改',
-                onTap: () => Navigator.of(sheetContext).pop('back'),
-              ),
-              _ClarificationAction(
-                icon: Icons.category_outlined,
-                label: '重新选择表达类型',
-                onTap: () => Navigator.of(sheetContext).pop('restart'),
-              ),
-              _ClarificationAction(
-                icon: Icons.refresh_rounded,
-                label: '继续生成不同方向',
-                onTap: () => Navigator.of(sheetContext).pop('more'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (!mounted || action == null) return;
-    switch (action) {
-      case 'type':
-        await _openFragmentInput();
-        return;
-      case 'voice':
-        await _openFragmentInput(autoStartVoice: true);
-        return;
-      case 'back':
-        final selections = _session?.selections ?? const [];
-        if (selections.isNotEmpty) await _editFrom(selections.last.slot);
-        return;
-      case 'restart':
-        setState(() {
-          _session = null;
-          _resetStepState();
-        });
-        return;
-      case 'more':
-        setState(() => _refreshAttempts = 0);
-        await _recommendCurrentStep(
-          forceRefresh: true,
-          diversificationLevel: 3,
-        );
-        return;
-    }
-  }
-
-  Future<void> _openFragmentInput({
-    bool autoStartVoice = false,
-    bool asSeed = false,
-  }) async {
-    final step = asSeed ? null : _session?.currentStep;
-    final value = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _FragmentInputSheet(
-        service: _fragmentAsrService,
-        title: step == null ? '你还记得哪些字？' : '补充“${step.slot.label}”',
-        autoStartVoice: autoStartVoice,
-      ),
-    );
-    await _fragmentAsrService.stop();
-    if (!mounted || value == null || value.trim().isEmpty) return;
-    if (asSeed || _session == null) {
-      setState(() {
-        _seedFragment = value.trim();
-        _session?.seedFragment = _seedFragment;
-        if (_session != null) _resetStepState();
-      });
-      if (_session?.currentStep != null) {
-        await _recommendCurrentStep();
-      }
-      return;
-    }
-    await _chooseCandidate(StuckCandidate(
-      text: value.trim(),
-      semanticGroup: '用户输入',
-      slot: step!.slot,
-    ));
-  }
-
-  Widget _buildIntentPicker() {
-    Widget card({
-      required String title,
-      required Color backgroundColor,
-      required Color iconBackground,
-      required IconData icon,
-      required StuckExpressionIntent intent,
-    }) {
-      return Expanded(
-        child: _IntentCard(
-          title: title,
-          backgroundColor: backgroundColor,
-          iconBackground: iconBackground,
-          icon: icon,
-          onTap: () => _chooseIntent(intent),
-        ),
-      );
-    }
-
-    return Column(
-      children: [
-        Row(
-          children: [
-            card(
-              title: '要人帮忙',
-              backgroundColor: const Color(0xFFFFE2C8),
-              iconBackground: const Color(0xFFFFF1DC),
-              icon: Icons.volunteer_activism_rounded,
-              intent: StuckExpressionIntent.help,
-            ),
-            const SizedBox(width: 18),
-            card(
-              title: '表达不舒服',
-              backgroundColor: const Color(0xFFC9F1E8),
-              iconBackground: const Color(0xFFB7E6EE),
-              icon: Icons.healing_rounded,
-              intent: StuckExpressionIntent.discomfort,
-            ),
-          ],
-        ),
-        const SizedBox(height: 18),
-        Row(
-          children: [
-            card(
-              title: '要东西',
-              backgroundColor: const Color(0xFFDCD9FF),
-              iconBackground: const Color(0xFFEDD8F7),
-              icon: Icons.local_mall_rounded,
-              intent: StuckExpressionIntent.object,
-            ),
-            const SizedBox(width: 18),
-            card(
-              title: '问问题',
-              backgroundColor: const Color(0xFFFFC9CC),
-              iconBackground: const Color(0xFFFFE5E6),
-              icon: Icons.help_outline_rounded,
-              intent: StuckExpressionIntent.question,
-            ),
-          ],
-        ),
-        const SizedBox(height: 18),
-        _WideIntentCard(
-          title: '说明情况',
-          subtitle: '描述刚才发生的事，或补充一句背景',
-          backgroundColor: const Color(0xFFEAF0FF),
-          iconBackground: const Color(0xFFF2F5FF),
-          icon: Icons.chat_bubble_outline_rounded,
-          onTap: () => _chooseIntent(StuckExpressionIntent.situation),
-        ),
-        const SizedBox(height: 18),
-        OutlinedButton.icon(
-          onPressed: () => _openFragmentInput(asSeed: true),
-          icon: const Icon(Icons.edit_note_rounded),
-          label: Text(
-            _seedFragment.isEmpty ? '我只记得几个字' : '已记住：$_seedFragment（点击修改）',
-          ),
-          style: OutlinedButton.styleFrom(
-            minimumSize: const Size.fromHeight(52),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(18),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildExpressionTrail(StuckExpressionSession session) {
-    final selectedCount = session.selections.length;
-    final stepCount = session.activeSteps.length;
-    final lastSelection =
-        session.selections.isEmpty ? null : session.selections.last;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.64),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.72)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 28,
-            height: 28,
-            decoration: const BoxDecoration(
-              color: AppColors.primaryLight,
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(
-              Icons.route_rounded,
-              size: 16,
-              color: AppColors.primary,
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              selectedCount == 0
-                  ? session.intent.label
-                  : '${session.intent.label} · 已补充 $selectedCount/$stepCount 项',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w800,
-                color: AppColors.textPrimary,
-              ),
-            ),
-          ),
-          if (session.seedFragment.isNotEmpty)
-            TextButton(
-              onPressed: () => _openFragmentInput(asSeed: true),
-              child: const Text('改提示'),
-            ),
-          if (lastSelection != null)
-            TextButton(
-              onPressed: () => _editFrom(lastSelection.slot),
-              child: const Text('改上一步'),
-            ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final session = _session;
-    final step = session?.currentStep;
-    final pickingIntent = session == null;
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      body: Stack(
-        children: [
-          SafeArea(
-            child: ListView(
-              padding: const EdgeInsets.all(AppSpacing.page),
-              children: [
-                PageHeader(
-                  title: pickingIntent ? '你想表达什么？' : step?.title ?? '表达已经足够清楚',
-                  subtitle: pickingIntent
-                      ? '先选择最接近的任务，也可以输入记得的几个字'
-                      : step?.subtitle ?? '可以整理成完整句子，也可以返回修改',
-                  onBack: _goBackWithinFlow,
-                ),
-                const SizedBox(height: 18),
-                if (session != null) ...[
-                  _buildExpressionTrail(session),
-                  const SizedBox(height: AppSpacing.section),
-                ],
-                if (pickingIntent)
-                  _buildIntentPicker()
-                else ...[
-                  if (step != null)
-                    _isRecommending
-                        ? _CandidateLoadingGrid(
-                            count: widget.preferredCandidateCount,
-                          )
-                        : _StuckCandidateGrid(
-                            candidates: _visibleCandidates,
-                            imageScale: widget.candidateImageScale,
-                            onSelected: _chooseCandidate,
-                          ),
-                  if (step != null && !_isRecommending) ...[
-                    const SizedBox(height: 14),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        TextButton.icon(
-                          onPressed: _isRefreshing ? null : _refreshOptions,
-                          icon: const Icon(Icons.refresh_rounded),
-                          label: Text(_isRefreshing ? '正在换一组' : '换一组'),
-                        ),
-                        if (step.optional) ...[
-                          const SizedBox(width: 8),
-                          TextButton(
-                            onPressed: _skipCurrentStep,
-                            child: const Text('跳过这一步'),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ],
-                  if (session.canFinish) ...[
-                    const SizedBox(height: 18),
-                    SizedBox(
-                      height: 54,
-                      child: FilledButton.icon(
-                        onPressed: _finishExpression,
-                        icon: const Icon(Icons.auto_awesome_rounded),
-                        label: Text(step == null ? '整理成完整句子' : '现在整理成句'),
-                        style: FilledButton.styleFrom(
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(18),
-                          ),
-                        ),
-                      ),
-                    ),
-                    if (step != null)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Center(
-                          child: Text(
-                            '也可以继续选择，让表达更准确',
-                            style: TextStyle(color: AppColors.textSecondary),
-                          ),
-                        ),
-                      ),
-                  ],
-                ],
-              ],
-            ),
-          ),
-          YuqiaoFeatureAssistiveBall(
-            currentFeature: YuqiaoFeature.stuck,
-            launcher: widget.featureLauncher,
-            bottomClearance: 28,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _FragmentInputSheet extends StatefulWidget {
-  const _FragmentInputSheet({
-    required this.service,
-    required this.title,
-    required this.autoStartVoice,
-  });
-
-  final ParaformerAsrService service;
-  final String title;
-  final bool autoStartVoice;
-
-  @override
-  State<_FragmentInputSheet> createState() => _FragmentInputSheetState();
-}
-
-class _FragmentInputSheetState extends State<_FragmentInputSheet> {
-  late final TextEditingController _controller;
-  bool _recording = false;
-  String? _errorText;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = TextEditingController();
-    if (widget.autoStartVoice) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) unawaited(_toggleVoice());
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    unawaited(widget.service.stop());
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _toggleVoice() async {
-    if (_recording) {
-      await widget.service.stop();
-      if (mounted) setState(() => _recording = false);
-      return;
-    }
-    setState(() {
-      _recording = true;
-      _errorText = null;
-    });
-    try {
-      await widget.service.start(
-        onTranscript: (text, isFinal) {
-          if (!mounted) return;
-          _controller.value = TextEditingValue(
-            text: text,
-            selection: TextSelection.collapsed(offset: text.length),
-          );
-          if (isFinal) {
-            setState(() => _recording = false);
-            unawaited(widget.service.stop());
-          }
-        },
-        onStatus: (_) {},
-        onError: (message) {
-          if (!mounted) return;
-          setState(() {
-            _recording = false;
-            _errorText = message;
-          });
-        },
-      );
-      if (!mounted) await widget.service.stop();
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _recording = false;
-        _errorText = error.toString();
-      });
-    }
-  }
-
-  void _submit() {
-    final text = _controller.text.trim();
-    if (text.isEmpty) return;
-    unawaited(widget.service.stop());
-    Navigator.of(context).pop(text);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
-        decoration: const BoxDecoration(
-          color: Color(0xFFFDFDFE),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(widget.title, style: AppTextStyles.sectionTitle),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _controller,
-              autofocus: !widget.autoStartVoice,
-              maxLength: 20,
-              onSubmitted: (_) => _submit(),
-              decoration: InputDecoration(
-                hintText: '输入一个字、词或短语',
-                filled: true,
-                fillColor: const Color(0xFFF3F4F7),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: BorderSide.none,
-                ),
-                suffixIcon: IconButton(
-                  tooltip: _recording ? '停止录音' : '语音输入',
-                  onPressed: _toggleVoice,
-                  icon: Icon(
-                    _recording ? Icons.stop_rounded : Icons.mic_rounded,
-                    color: _recording ? AppColors.danger : AppColors.primary,
-                  ),
-                ),
-              ),
-            ),
-            if (_errorText != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Text(
-                  _errorText!,
-                  style: const TextStyle(color: AppColors.danger),
-                ),
-              ),
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: FilledButton(
-                onPressed: _submit,
-                child: const Text('使用这段内容'),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _StuckCandidateGrid extends StatelessWidget {
-  const _StuckCandidateGrid({
-    super.key,
-    required this.candidates,
-    required this.imageScale,
-    required this.onSelected,
-  });
-
-  final List<StuckCandidate> candidates;
-  final double imageScale;
-  final ValueChanged<StuckCandidate> onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    final effectiveScale = imageScale.clamp(0.85, 1.55).toDouble();
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: candidates.length,
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        crossAxisSpacing: AppSpacing.gap,
-        mainAxisSpacing: AppSpacing.gap,
-        childAspectRatio: effectiveScale >= 1.25 ? 0.95 : 1.2,
-      ),
-      itemBuilder: (context, index) {
-        final candidate = candidates[index];
-        final style = _candidateCardStyles[index % _candidateCardStyles.length];
-        final iconDiameter = (44 * effectiveScale).clamp(38.0, 70.0);
-        final iconSize = (26 * effectiveScale).clamp(22.0, 42.0);
-        final cardPadding = effectiveScale >= 1.3
-            ? 12.0
-            : effectiveScale >= 1.15
-                ? 14.0
-                : 16.0;
-        return InkWell(
-          borderRadius: BorderRadius.circular(28),
-          onTap: () => onSelected(candidate),
-          child: Container(
-            padding: EdgeInsets.all(cardPadding),
-            decoration: BoxDecoration(
-              color: style.background,
-              borderRadius: BorderRadius.circular(28),
-              border: Border.all(
-                color: Colors.white.withValues(alpha: 0.72),
-                width: 1.2,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: style.shadow.withValues(alpha: 0.16),
-                  blurRadius: 16,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: iconDiameter,
-                  height: iconDiameter,
-                  decoration: BoxDecoration(
-                    color: style.iconBackground.withValues(alpha: 0.88),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    _candidateIconForText(
-                      candidate.text,
-                      semanticGroup: candidate.semanticGroup,
-                    ),
-                    size: iconSize,
-                    color: const Color(0xFF151515),
-                  ),
-                ),
-                SizedBox(height: 10 + (effectiveScale - 1) * 4),
-                Flexible(
-                  child: Text(
-                    candidate.text,
-                    textAlign: TextAlign.center,
-                    maxLines: effectiveScale >= 1.3 ? 2 : 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 20,
-                      height: 1.2,
-                      fontWeight: FontWeight.w800,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _ClarificationAction extends StatelessWidget {
-  const _ClarificationAction({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(icon, color: AppColors.primary),
-      title: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
-      trailing: const Icon(Icons.chevron_right_rounded),
-      onTap: onTap,
-    );
-  }
-}
-
-class _CandidateLoadingGrid extends StatefulWidget {
-  const _CandidateLoadingGrid({
-    super.key,
-    required this.count,
-  });
-
-  final int count;
-
-  @override
-  State<_CandidateLoadingGrid> createState() => _CandidateLoadingGridState();
-}
-
-class _CandidateLoadingGridState extends State<_CandidateLoadingGrid>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final count = widget.count.clamp(2, 6).toInt();
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: count,
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        crossAxisSpacing: AppSpacing.gap,
-        mainAxisSpacing: AppSpacing.gap,
-        childAspectRatio: 1.35,
-      ),
-      itemBuilder: (context, index) {
-        final style = _candidateCardStyles[index % _candidateCardStyles.length];
-        return AnimatedBuilder(
-          animation: _controller,
-          builder: (context, child) {
-            final phase = (_controller.value - index * 0.14) % 1.0;
-            final pulse =
-                (1 - (phase * 2 - 1).abs()).clamp(0.0, 1.0).toDouble();
-            return Transform.scale(
-              scale: 0.985 + pulse * 0.015,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Color.lerp(
-                    style.background.withValues(alpha: 0.68),
-                    style.background,
-                    pulse,
-                  ),
-                  borderRadius: BorderRadius.circular(28),
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.72),
-                    width: 1.2,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: style.shadow.withValues(
-                        alpha: 0.08 + pulse * 0.15,
-                      ),
-                      blurRadius: 12 + pulse * 10,
-                      offset: const Offset(0, 8),
-                    ),
-                  ],
-                ),
-                child: Center(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: List.generate(3, (dotIndex) {
-                      final dotPhase =
-                          (_controller.value * 1.5 - dotIndex * 0.16) % 1.0;
-                      final dotPulse = (1 - (dotPhase * 2 - 1).abs())
-                          .clamp(0.0, 1.0)
-                          .toDouble();
-                      return Container(
-                        width: 7 + dotPulse * 2,
-                        height: 7 + dotPulse * 2,
-                        margin: const EdgeInsets.symmetric(horizontal: 4),
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: style.shadow.withValues(
-                            alpha: 0.30 + dotPulse * 0.50,
-                          ),
-                        ),
-                      );
-                    }),
-                  ),
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-class _IntentCard extends StatelessWidget {
-  final String title;
-  final Color backgroundColor;
-  final Color iconBackground;
-  final IconData icon;
-  final VoidCallback onTap;
-
-  const _IntentCard({
-    required this.title,
-    required this.backgroundColor,
-    required this.iconBackground,
-    required this.icon,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 0.98,
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: backgroundColor,
-            borderRadius: BorderRadius.circular(28),
-            boxShadow: [
-              BoxShadow(
-                color: backgroundColor.withValues(alpha: 0.26),
-                blurRadius: 18,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 43,
-                height: 43,
-                decoration: BoxDecoration(
-                  color: iconBackground.withValues(alpha: 0.86),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(icon, size: 23, color: const Color(0xFF111111)),
-              ),
-              const Spacer(),
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF151515),
-                  letterSpacing: -0.2,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _WideIntentCard extends StatelessWidget {
-  final String title;
-  final String subtitle;
-  final Color backgroundColor;
-  final Color iconBackground;
-  final IconData icon;
-  final VoidCallback onTap;
-
-  const _WideIntentCard({
-    required this.title,
-    required this.subtitle,
-    required this.backgroundColor,
-    required this.iconBackground,
-    required this.icon,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        constraints: const BoxConstraints(minHeight: 82),
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-        decoration: BoxDecoration(
-          color: backgroundColor,
-          borderRadius: BorderRadius.circular(26),
-          boxShadow: [
-            BoxShadow(
-              color: backgroundColor.withValues(alpha: 0.22),
-              blurRadius: 16,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 48,
-              height: 48,
-              decoration: BoxDecoration(
-                color: iconBackground.withValues(alpha: 0.92),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(icon, size: 24, color: const Color(0xFF111111)),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 19,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF151515),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: const Color(0xFF151515).withValues(alpha: 0.56),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            Icon(
-              Icons.arrow_forward_ios_rounded,
-              size: 16,
-              color: const Color(0xFF151515).withValues(alpha: 0.46),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class AiCandidatesPage extends StatefulWidget {
   const AiCandidatesPage({
     super.key,
@@ -9934,3180 +8772,6 @@ class _SentenceCardNew extends StatelessWidget {
   }
 }
 
-class CameraWordPage extends StatefulWidget {
-  const CameraWordPage({
-    super.key,
-    required this.qwenService,
-    required this.locationController,
-    required this.companionAgent,
-    required this.personalizedLearningEnabled,
-    required this.vocabularyEntries,
-    required this.personalObjects,
-    required this.expressionHabits,
-    required this.personalObjectStore,
-    required this.featureLauncher,
-    required this.onPersonalObjectsChanged,
-    required this.onHabitRecorded,
-    required this.onVocabularyChanged,
-    required this.onExpressionCompleted,
-    required this.onFavoriteSaved,
-  });
-
-  final QwenService qwenService;
-  final LocationRecommendationController locationController;
-  final CompanionAgentController companionAgent;
-  final bool personalizedLearningEnabled;
-  final List<VocabularyEntry> vocabularyEntries;
-  final List<PersonalObject> personalObjects;
-  final List<ExpressionHabit> expressionHabits;
-  final PersonalObjectStore personalObjectStore;
-  final YuqiaoFeatureLauncher featureLauncher;
-  final Future<void> Function() onPersonalObjectsChanged;
-  final HabitRecordCallback onHabitRecorded;
-  final VocabularyChangedCallback onVocabularyChanged;
-  final ExpressionCallback onExpressionCompleted;
-  final ExpressionCallback onFavoriteSaved;
-
-  @override
-  State<CameraWordPage> createState() => _CameraWordPageState();
-}
-
-class _CameraWordPageState extends State<CameraWordPage> {
-  static const _galleryChannel =
-      MethodChannel('com.example.yuqiao_app/gallery');
-  static const double _cameraControlsClearance = 176;
-  final ImagePicker _picker = ImagePicker();
-  final FlutterTts _tts = FlutterTts();
-  final LocalObjectLocator _localObjectLocator = LocalObjectLocator();
-  Future<ObjectRecognition>? _recognition;
-  Uint8List? _imageBytes;
-  Uint8List? _frozenPreviewBytes;
-  Size? _capturedImageSize;
-  ObjectCandidate? _selectedCandidate;
-  late List<VocabularyEntry> _localVocabularyEntries;
-  late List<PersonalObject> _personalObjects;
-  bool _isTakingPhoto = false;
-  SensorConfig? _sensorConfig;
-  double _pinchBaseZoom = 0.0;
-  double _minZoomRatio = 1.0;
-  double _maxZoomRatio = 1.0;
-  bool _zoomInitialized = false;
-  final ValueNotifier<double> _zoomValue = ValueNotifier<double>(0);
-  double? _pendingZoom;
-  bool _zoomWriteInProgress = false;
-  bool _isFrontCamera = false;
-  bool _captureWasFrontCamera = false;
-  bool _capturedImageMirrored = false;
-  int _imageRequestId = 0;
-  final GlobalKey _resultPanelKey = GlobalKey();
-  double _resultPanelHeight = 160;
-
-  // 闪光灯
-  FlashMode _flashMode = FlashMode.none;
-  bool _flashExpanded = false;
-
-  // 亮度调节
-  double _brightness = 0.5;
-  bool _isAdjustingBrightness = false;
-  final Set<int> _previewPointers = <int>{};
-  int? _brightnessPointer;
-  Offset _brightnessDrag = Offset.zero;
-
-  void _setFlashMode(FlashMode mode) {
-    setState(() {
-      _flashMode = mode;
-      _flashExpanded = false;
-    });
-    _sensorConfig?.setFlashMode(mode);
-  }
-
-  IconData _flashIcon() {
-    switch (_flashMode) {
-      case FlashMode.on:
-        return Icons.flash_on_rounded;
-      case FlashMode.auto:
-        return Icons.flash_auto_rounded;
-      case FlashMode.always:
-        return Icons.flashlight_on_rounded;
-      case FlashMode.none:
-        return Icons.flash_off_rounded;
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _localVocabularyEntries = List.of(widget.vocabularyEntries);
-    _personalObjects = List.of(widget.personalObjects);
-    widget.locationController.refreshLocationContext();
-    _tts.setLanguage('zh-CN');
-    _tts.setSpeechRate(0.45);
-    _tts.setPitch(1.0);
-  }
-
-  @override
-  void dispose() {
-    _tts.stop();
-    unawaited(_localObjectLocator.close());
-    _zoomValue.dispose();
-    super.dispose();
-  }
-
-  String get _locationTypeContext {
-    if (!widget.locationController.enabled) return '未知地点';
-    final place = widget.locationController.currentPlace;
-    if (place != null) return place.typeLabel;
-    final semantic = widget.locationController.currentSemantic;
-    return semantic == null ? '未知地点' : PlaceTypeCatalog.labelOf(semantic.type);
-  }
-
-  String get _timeContext {
-    final now = DateTime.now();
-    final period = switch (now.hour) {
-      >= 5 && < 11 => '早上',
-      >= 11 && < 14 => '中午',
-      >= 14 && < 18 => '下午',
-      >= 18 && < 24 => '晚上',
-      _ => '深夜',
-    };
-    return '$period ${now.hour.toString().padLeft(2, '0')}:'
-        '${now.minute.toString().padLeft(2, '0')}';
-  }
-
-  Future<ObjectRecognition> _recognizeImage(Uint8List bytes) async {
-    final localBoxesFuture = _localObjectLocator.detect(bytes);
-    final recognition = await widget.qwenService.recognizeObject(
-      bytes,
-      personalObjects: _personalObjects,
-      locationType: _locationTypeContext,
-      timeContext: _timeContext,
-    );
-    final localBoxes = await localBoxesFuture.catchError(
-      (_) => <LocalObjectBox>[],
-    );
-    return _mergeLocalObjectBoxes(recognition, localBoxes);
-  }
-
-  ObjectRecognition _mergeLocalObjectBoxes(
-    ObjectRecognition recognition,
-    List<LocalObjectBox> localBoxes,
-  ) {
-    if (recognition.candidates.isEmpty || localBoxes.isEmpty) {
-      return recognition;
-    }
-    final merged = <ObjectCandidate>[];
-    final usedLocalBoxIndexes = <int>{};
-    for (var index = 0; index < recognition.candidates.length; index++) {
-      final candidate = recognition.candidates[index];
-      final localBoxIndex = _bestLocalBoxIndexForCandidate(
-        candidate,
-        recognition.candidates.length,
-        localBoxes,
-        usedLocalBoxIndexes,
-      );
-      if (localBoxIndex == null) {
-        merged.add(candidate);
-      } else {
-        usedLocalBoxIndexes.add(localBoxIndex);
-        final localBox = localBoxes[localBoxIndex];
-        merged.add(candidate.copyWith(bbox: localBox.bbox));
-      }
-    }
-    return ObjectRecognition(candidates: merged);
-  }
-
-  int? _bestLocalBoxIndexForCandidate(
-    ObjectCandidate candidate,
-    int candidateCount,
-    List<LocalObjectBox> localBoxes,
-    Set<int> usedLocalBoxIndexes,
-  ) {
-    final qwenBox = candidate.bbox;
-    if (qwenBox == null || qwenBox.length != 4) {
-      if (candidateCount == 1 && !usedLocalBoxIndexes.contains(0)) return 0;
-      return null;
-    }
-
-    var bestIndex = -1;
-    var bestScore = 0.0;
-    for (var index = 0; index < localBoxes.length; index++) {
-      if (usedLocalBoxIndexes.contains(index)) continue;
-      final box = localBoxes[index];
-      final overlap = _boxIou(qwenBox, box.bbox);
-      final centerScore = _boxCenterScore(qwenBox, box.bbox);
-      final sizePenalty = _boxAreaRatioPenalty(qwenBox, box.bbox);
-      final score = overlap * 0.62 +
-          centerScore * 0.28 +
-          box.confidence * 0.10 -
-          sizePenalty;
-      if (score > bestScore) {
-        bestScore = score;
-        bestIndex = index;
-      }
-    }
-    if (bestIndex < 0 || bestScore < 0.20) return null;
-    return bestIndex;
-  }
-
-  double _boxIou(List<double> a, List<double> b) {
-    final left = math.max(a[0], b[0]);
-    final top = math.max(a[1], b[1]);
-    final right = math.min(a[2], b[2]);
-    final bottom = math.min(a[3], b[3]);
-    final intersection =
-        math.max(0.0, right - left) * math.max(0.0, bottom - top);
-    final areaA = math.max(0.0, a[2] - a[0]) * math.max(0.0, a[3] - a[1]);
-    final areaB = math.max(0.0, b[2] - b[0]) * math.max(0.0, b[3] - b[1]);
-    final union = areaA + areaB - intersection;
-    if (union <= 0) return 0;
-    return intersection / union;
-  }
-
-  double _boxCenterScore(List<double> a, List<double> b) {
-    final ax = (a[0] + a[2]) / 2;
-    final ay = (a[1] + a[3]) / 2;
-    final bx = (b[0] + b[2]) / 2;
-    final by = (b[1] + b[3]) / 2;
-    final distance = math.sqrt(math.pow(ax - bx, 2) + math.pow(ay - by, 2));
-    return (1 - distance / 1414.0).clamp(0.0, 1.0).toDouble();
-  }
-
-  double _boxAreaRatioPenalty(List<double> a, List<double> b) {
-    final areaA = math.max(1.0, (a[2] - a[0]) * (a[3] - a[1]));
-    final areaB = math.max(1.0, (b[2] - b[0]) * (b[3] - b[1]));
-    final ratio = areaA > areaB ? areaA / areaB : areaB / areaA;
-    if (ratio <= 3.5) return 0;
-    return math.min(0.18, (ratio - 3.5) / 20);
-  }
-
-  void _resetForRetake() {
-    _imageRequestId++;
-    setState(() {
-      _imageBytes = null;
-      _frozenPreviewBytes = null;
-      _capturedImageSize = null;
-      _capturedImageMirrored = false;
-      _recognition = null;
-      _selectedCandidate = null;
-      _resultPanelHeight = 160;
-    });
-  }
-
-  Future<void> _speakObject(ObjectCandidate candidate) async {
-    unawaited(widget.companionAgent.recordInteraction(
-      text: candidate.objectName,
-      feature: 'camera',
-      action: CompanionFeedbackAction.spoken,
-      prompt: candidate.visualDescription,
-      slot: RecommendationSlot.actionOrObject,
-    ));
-    await _speakText(candidate.objectName);
-    if (candidate.personalObjectId.isNotEmpty) {
-      unawaited(
-          widget.personalObjectStore.markUsed(candidate.personalObjectId));
-    }
-  }
-
-  Future<void> _speakText(String value) async {
-    final text = value.trim();
-    if (text.isEmpty) return;
-    unawaited(
-      widget.onHabitRecorded(
-        text,
-        category: 'camera',
-        source: 'camera_quick_speak',
-      ),
-    );
-    unawaited(widget.onExpressionCompleted(text));
-    try {
-      await _tts.stop();
-      await _tts.speak(text);
-      if (mounted) {
-        showYuqiaoLearningReceipt(
-          context,
-          personalizedLearningEnabled: widget.personalizedLearningEnabled,
-          learnedMessage: '已播报，语桥会记住这个物品选择',
-          disabledMessage: '已播报，个性化学习已关闭',
-        );
-      }
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('语音播报暂时不可用，请稍后重试。')),
-      );
-    }
-  }
-
-  void _requestZoom(double value) {
-    if (!_zoomInitialized || _sensorConfig == null) return;
-    final target = value.clamp(0.0, 1.0).toDouble();
-    if ((_zoomValue.value - target).abs() > 0.0001) {
-      _zoomValue.value = target;
-    }
-    _pendingZoom = target;
-    _drainZoomQueue();
-  }
-
-  Future<void> _drainZoomQueue() async {
-    if (_zoomWriteInProgress) return;
-    _zoomWriteInProgress = true;
-    try {
-      while (mounted && _pendingZoom != null) {
-        final target = _pendingZoom!;
-        _pendingZoom = null;
-        final sensorConfig = _sensorConfig;
-        if (sensorConfig == null) break;
-        try {
-          await sensorConfig.setZoom(target);
-        } catch (_) {
-          // A sensor switch can invalidate an in-flight zoom request.
-        }
-      }
-    } finally {
-      _zoomWriteInProgress = false;
-      if (mounted && _pendingZoom != null) _drainZoomQueue();
-    }
-  }
-
-  void _onPreviewPointerDown(PointerDownEvent event) {
-    _previewPointers.add(event.pointer);
-    final screenHeight = MediaQuery.sizeOf(context).height;
-    final isInsideCameraGestureArea = event.position.dy >= 96 &&
-        event.position.dy <= screenHeight - 170 &&
-        _imageBytes == null;
-    if (!isInsideCameraGestureArea) return;
-    if (_previewPointers.length == 1) {
-      _brightnessPointer = event.pointer;
-      _brightnessDrag = Offset.zero;
-    } else {
-      _cancelBrightnessGesture();
-    }
-  }
-
-  void _onPreviewPointerMove(PointerMoveEvent event) {
-    if (_previewPointers.length != 1 || event.pointer != _brightnessPointer) {
-      return;
-    }
-    _brightnessDrag += event.delta;
-    if (!_isAdjustingBrightness) {
-      final isIntentionalVerticalDrag = _brightnessDrag.dy.abs() >= 24 &&
-          _brightnessDrag.dy.abs() > _brightnessDrag.dx.abs() * 1.35;
-      if (!isIntentionalVerticalDrag) return;
-      setState(() => _isAdjustingBrightness = true);
-    }
-
-    final nextBrightness =
-        (_brightness - event.delta.dy / 400).clamp(0.0, 1.0).toDouble();
-    if ((nextBrightness - _brightness).abs() < 0.0001) return;
-    setState(() => _brightness = nextBrightness);
-    // 直接调用原生 API，绕过 SensorConfig 的 500ms 防抖
-    try {
-      CamerawesomePlugin.setBrightness(nextBrightness);
-    } catch (_) {}
-  }
-
-  void _onPreviewPointerUp(PointerEvent event) {
-    _previewPointers.remove(event.pointer);
-    if (event.pointer == _brightnessPointer || _previewPointers.isEmpty) {
-      _cancelBrightnessGesture();
-    }
-  }
-
-  void _cancelBrightnessGesture() {
-    _brightnessPointer = null;
-    _brightnessDrag = Offset.zero;
-    if (_isAdjustingBrightness && mounted) {
-      setState(() => _isAdjustingBrightness = false);
-    }
-  }
-
-  /// 初始化相机倍率到 1.0x，使用重试机制确保成功
-  Future<void> _initZoomToOneX() async {
-    if (_zoomInitialized || _sensorConfig == null || !mounted) return;
-
-    // 尝试多次，因为相机管线可能尚未完全就绪
-    for (int attempt = 0; attempt < 8; attempt++) {
-      if (!mounted || _sensorConfig == null) return;
-      try {
-        // 直接查询设备的缩放范围
-        final minR = await CamerawesomePlugin.getMinZoom();
-        final maxR = await CamerawesomePlugin.getMaxZoom();
-        if (minR != null && maxR != null && maxR > minR) {
-          _minZoomRatio = minR;
-          _maxZoomRatio = maxR;
-          // 计算 1.0x 光学变焦在 normalized (0-1) 范围中的位置
-          if (minR <= 1.0 && maxR >= 1.0) {
-            final oneXNormalized =
-                ((1.0 - minR) / (maxR - minR)).clamp(0.0, 1.0);
-            await _sensorConfig!.setZoom(oneXNormalized);
-            _zoomValue.value = oneXNormalized.toDouble();
-            _zoomInitialized = true;
-            return;
-          }
-        }
-      } catch (_) {}
-      // 等待后重试（相机管线可能还没就绪）
-      await Future.delayed(Duration(milliseconds: 400 * (attempt + 1)));
-    }
-
-    // 最终回退
-    if (!_zoomInitialized && mounted && _sensorConfig != null) {
-      try {
-        await _sensorConfig!.setZoom(0.0);
-        _zoomValue.value = 0;
-        _zoomInitialized = true;
-      } catch (_) {}
-    }
-  }
-
-  Future<void> _captureWithCamerawesome(CameraState state) async {
-    if (_isTakingPhoto) {
-      return;
-    }
-    if (_imageBytes != null) {
-      setState(() {
-        _imageBytes = null;
-        _frozenPreviewBytes = null;
-        _capturedImageSize = null;
-        _capturedImageMirrored = false;
-        _recognition = null;
-        _selectedCandidate = null;
-        _resultPanelHeight = 160;
-      });
-      return;
-    }
-
-    try {
-      if (state is PhotoCameraState) {
-        await _freezeCurrentPreviewFrame();
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _isTakingPhoto = true;
-          _captureWasFrontCamera = _isFrontCamera;
-        });
-        await state.takePhoto(
-          onPhotoFailed: (exception) {
-            if (!mounted) {
-              return;
-            }
-            setState(() {
-              _isTakingPhoto = false;
-              _frozenPreviewBytes = null;
-            });
-          },
-        );
-      }
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _isTakingPhoto = false;
-        _frozenPreviewBytes = null;
-      });
-    }
-  }
-
-  Future<void> _freezeCurrentPreviewFrame() async {
-    if (_imageBytes != null || _frozenPreviewBytes != null) return;
-    try {
-      final previewContext = previewWidgetKey.currentContext;
-      final renderObject = previewContext?.findRenderObject();
-      if (renderObject is! RenderRepaintBoundary) return;
-      if (renderObject.debugNeedsPaint) {
-        await WidgetsBinding.instance.endOfFrame;
-      }
-      if (!mounted || _imageBytes != null) return;
-      final image = await renderObject.toImage(pixelRatio: 1.0);
-      final byteData = await image.toByteData(format: ImageByteFormat.png);
-      image.dispose();
-      if (!mounted || byteData == null || _imageBytes != null) return;
-      setState(() {
-        _frozenPreviewBytes = byteData.buffer.asUint8List();
-      });
-    } catch (error) {
-      yuqiaoDebugLog('[Camera freeze] preview snapshot skipped: $error');
-    }
-  }
-
-  Future<void> _handleMediaCapture(MediaCapture mediaCapture) async {
-    if (!mediaCapture.isPicture) {
-      return;
-    }
-    if (mediaCapture.status == MediaCaptureStatus.capturing) {
-      if (mounted) {
-        setState(() {
-          _isTakingPhoto = true;
-        });
-      }
-      return;
-    }
-    if (mediaCapture.status == MediaCaptureStatus.failure) {
-      if (mounted) {
-        setState(() {
-          _isTakingPhoto = false;
-          _frozenPreviewBytes = null;
-        });
-      }
-      return;
-    }
-    if (mediaCapture.status != MediaCaptureStatus.success) {
-      return;
-    }
-
-    final path = mediaCapture.captureRequest.path;
-    if (path == null || path.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _isTakingPhoto = false;
-          _frozenPreviewBytes = null;
-        });
-      }
-      return;
-    }
-
-    if (!mounted) {
-      return;
-    }
-    try {
-      final bytes = await File(path).readAsBytes();
-      if (!mounted) return;
-      setState(() {
-        _isTakingPhoto = false;
-      });
-      await _startRecognition(bytes, mirrored: _captureWasFrontCamera);
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _isTakingPhoto = false;
-        _frozenPreviewBytes = null;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('照片处理失败：$error')),
-      );
-    }
-  }
-
-  Future<void> _pick(ImageSource source) async {
-    final picked = await _picker.pickImage(
-      source: source,
-      imageQuality: 76,
-      maxWidth: 1280,
-    );
-    if (picked == null) {
-      return;
-    }
-    final bytes = await picked.readAsBytes();
-    if (mounted) {
-      setState(() => _frozenPreviewBytes = null);
-    }
-    await _startRecognition(bytes);
-  }
-
-  /// 打开系统默认相册（而非文件管理器）
-  Future<void> _openDefaultGallery() async {
-    try {
-      final String? path = await _galleryChannel.invokeMethod('openGallery');
-      if (path == null || path.isEmpty) return; // 用户取消
-      final bytes = await File(path).readAsBytes();
-      if (mounted) {
-        setState(() => _frozenPreviewBytes = null);
-      }
-      await _startRecognition(bytes);
-    } catch (e) {
-      // 平台通道失败时回退到 image_picker
-      await _pick(ImageSource.gallery);
-    }
-  }
-
-  Future<void> _startRecognition(
-    Uint8List bytes, {
-    bool mirrored = false,
-  }) async {
-    final requestId = ++_imageRequestId;
-    Uint8List normalizedBytes;
-    try {
-      normalizedBytes = await compute(normalizeCameraImage, bytes);
-    } catch (error) {
-      yuqiaoDebugLog('[Camera image] normalization skipped: $error');
-      normalizedBytes = bytes;
-    }
-    if (!mounted || requestId != _imageRequestId) return;
-    setState(() {
-      _imageBytes = normalizedBytes;
-      _frozenPreviewBytes = null;
-      _capturedImageSize = null;
-      _capturedImageMirrored = mirrored;
-      _selectedCandidate = null;
-      _resultPanelHeight = 160;
-      _recognition = _recognizeImage(normalizedBytes);
-    });
-    _readCapturedImageSize(normalizedBytes);
-  }
-
-  Future<void> _readCapturedImageSize(Uint8List bytes) async {
-    try {
-      final codec = await instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      final size = Size(
-        frame.image.width.toDouble(),
-        frame.image.height.toDouble(),
-      );
-      frame.image.dispose();
-      codec.dispose();
-      if (!mounted || !identical(bytes, _imageBytes)) return;
-      setState(() => _capturedImageSize = size);
-    } catch (_) {
-      // Fall back to normalized screen coordinates if metadata cannot be read.
-    }
-  }
-
-  void _useExpression(
-    ObjectCandidate candidate,
-    String expression, {
-    String? expressionType,
-  }) {
-    unawaited(widget.companionAgent.recordInteraction(
-      text: expression,
-      feature: 'camera',
-      action: CompanionFeedbackAction.accepted,
-      prompt: candidate.objectName,
-      slot: RecommendationSlot.sentence,
-    ));
-    widget.locationController.recordWordUsed(candidate.objectName, 'camera');
-    widget.locationController.recordWordUsed(expression, 'camera');
-    unawaited(
-      widget.onHabitRecorded(
-        candidate.objectName,
-        category: 'camera',
-        source: 'camera_object',
-      ),
-    );
-    unawaited(
-      widget.onHabitRecorded(
-        expression,
-        category: 'camera',
-        source: 'camera_expression',
-      ),
-    );
-    final draft = ExpressionDraft(
-      source: '拍照找词',
-      intent: expressionType == null ? '物品表达' : '物品表达 · $expressionType',
-      keywords: [
-        candidate.objectName,
-        if (expressionType != null) expressionType,
-        expression,
-      ],
-    );
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => AiCandidatesPage(
-          draft: draft,
-          qwenService: widget.qwenService,
-          personalizedLearningEnabled: widget.personalizedLearningEnabled,
-          onCandidateSelected: (text) async {
-            unawaited(widget.locationController.recordWordUsed(text, 'camera'));
-            unawaited(widget.companionAgent.recordInteraction(
-              text: text,
-              feature: 'camera',
-              action: CompanionFeedbackAction.accepted,
-              prompt: candidate.objectName,
-              slot: RecommendationSlot.sentence,
-            ));
-            unawaited(
-              widget.onHabitRecorded(
-                text,
-                category: 'camera',
-                source: 'camera_sentence_candidate',
-              ),
-            );
-          },
-          onCandidateSaved: (text) async {
-            unawaited(widget.companionAgent.recordInteraction(
-              text: text,
-              feature: 'camera',
-              action: CompanionFeedbackAction.saved,
-              prompt: candidate.objectName,
-              slot: RecommendationSlot.sentence,
-            ));
-          },
-          onExpressionCompleted: widget.onExpressionCompleted,
-          onFavoriteSaved: widget.onFavoriteSaved,
-        ),
-      ),
-    );
-  }
-
-  Future<bool> _savePersonalObject(ObjectCandidate candidate) async {
-    final imageBytes = _imageBytes;
-    if (imageBytes == null) return false;
-    final suggestedName = candidate.objectName.startsWith('我的')
-        ? candidate.objectName
-        : '我的${candidate.objectName}';
-    final draft = await showModalBottomSheet<PersonalObjectDraft>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => PersonalObjectEditSheet(
-        initialName: suggestedName,
-        initialCategory: candidate.category.isEmpty ? '其他' : candidate.category,
-        initialDescription: candidate.visualDescription,
-        initialExpressions: candidate.expressions,
-      ),
-    );
-    if (draft == null || draft.displayName.trim().isEmpty) return false;
-    final clean = draft.displayName.trim();
-    final existingObject = _personalObjects.any(
-      (item) => item.displayName.toLowerCase() == clean.toLowerCase(),
-    );
-    if (existingObject) {
-      if (!mounted) return true;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('“$clean”已经保存在我的物品中。')),
-      );
-      return true;
-    }
-    final created = await widget.personalObjectStore.create(
-      draft: draft,
-      referenceImageBytes: imageBytes,
-    );
-    final alreadyInVocabulary = _localVocabularyEntries.any(
-      (entry) => entry.category == '物品' && entry.text == clean,
-    );
-    if (!alreadyInVocabulary) {
-      final next = [
-        VocabularyEntry(
-          id: created.id,
-          category: '物品',
-          text: clean,
-          note: '我的物品',
-        ),
-        ..._localVocabularyEntries,
-      ];
-      await widget.onVocabularyChanged(next);
-      _localVocabularyEntries = next;
-    }
-    await widget.locationController.recordWordUsed(clean, 'vocabulary');
-    await widget.onHabitRecorded(
-      clean,
-      category: 'vocabulary',
-      source: 'personal_object_saved',
-    );
-    unawaited(widget.companionAgent.recordInteraction(
-      text: clean,
-      feature: 'camera',
-      action: CompanionFeedbackAction.saved,
-      prompt: candidate.objectName,
-      slot: RecommendationSlot.actionOrObject,
-    ));
-    _personalObjects = await widget.personalObjectStore.loadAll();
-    await widget.onPersonalObjectsChanged();
-    if (!mounted) return true;
-    setState(() {
-      _selectedCandidate = candidate.copyWith(
-        objectName: clean,
-        personalObjectId: created.id,
-      );
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已记住“$clean”')),
-    );
-    return true;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          Listener(
-            behavior: HitTestBehavior.translucent,
-            onPointerDown: _onPreviewPointerDown,
-            onPointerMove: _onPreviewPointerMove,
-            onPointerUp: _onPreviewPointerUp,
-            onPointerCancel: _onPreviewPointerUp,
-            child: CameraAwesomeBuilder.custom(
-              saveConfig: SaveConfig.photo(),
-              sensorConfig: SensorConfig.single(
-                sensor: Sensor.position(SensorPosition.back),
-                // 16:9 更接近竖屏取景比例，减少 4:3 预览在全屏 cover 下
-                // 被裁掉的大量左右区域。
-                aspectRatio: CameraAspectRatios.ratio_16_9,
-              ),
-              // 预览与拍后结果都显示完整画面，避免用户取景时看不到的
-              // JPEG 边缘在识别后突然出现。
-              previewFit: CameraPreviewFit.contain,
-              progressIndicator: const _CameraBootView(),
-              onMediaCaptureEvent: _handleMediaCapture,
-              onPreviewScaleBuilder: (cameraState) => OnPreviewScale(
-                onScaleStart: () {
-                  // 记录手势开始时的 normalized zoom
-                  _pinchBaseZoom = _zoomValue.value;
-                },
-                onScale: (scale) {
-                  if (_sensorConfig == null || !_zoomInitialized) return;
-                  // scale 是相对于手势开始时的比例（1.0 = 无变化）
-                  // 将 normalized zoom 转换为实际缩放比，应用手势缩放，再转回
-                  final baseRatio = _minZoomRatio +
-                      _pinchBaseZoom * (_maxZoomRatio - _minZoomRatio);
-                  final newRatio =
-                      (baseRatio * scale).clamp(_minZoomRatio, _maxZoomRatio);
-                  final newZoom = ((newRatio - _minZoomRatio) /
-                          (_maxZoomRatio - _minZoomRatio))
-                      .clamp(0.0, 1.0);
-                  _requestZoom(newZoom.toDouble());
-                },
-              ),
-              builder: (cameraState, preview) {
-                // Hold a reference to the sensor config for our pinch handler
-                final newSensorConfig = cameraState.sensorConfig;
-                if (_sensorConfig != newSensorConfig) {
-                  _sensorConfig = newSensorConfig;
-                  _zoomInitialized = false; // 传感器变化时重新初始化
-                }
-
-                // Initialize zoom to 1.0x after the camera pipeline is ready
-                if (!_zoomInitialized) {
-                  _initZoomToOneX();
-                }
-
-                return Stack(
-                  children: [
-                    // 亮度手势层：仅包裹相机预览区域
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: Stack(
-                          children: [
-                            if (_imageBytes != null)
-                              Positioned.fill(
-                                child: Transform.flip(
-                                  flipX: _capturedImageMirrored,
-                                  child: Image.memory(
-                                    _imageBytes!,
-                                    // 识别结果必须展示完整 JPEG；否则 cover 裁掉的区域
-                                    // 仍会拥有模型框，看起来就像框跑到了屏幕外。
-                                    fit: BoxFit.contain,
-                                    gaplessPlayback: true,
-                                    filterQuality: FilterQuality.medium,
-                                  ),
-                                ),
-                              )
-                            else if (_isTakingPhoto &&
-                                _frozenPreviewBytes != null)
-                              Positioned.fill(
-                                child: Image.memory(
-                                  _frozenPreviewBytes!,
-                                  fit: BoxFit.cover,
-                                  gaplessPlayback: true,
-                                  filterQuality: FilterQuality.low,
-                                ),
-                              ),
-                            const Positioned.fill(
-                                child: _CameraOverlayGradient()),
-                            // 亮度视觉遮罩（曝光补偿效果不明显时的辅助反馈）
-                            if (_brightness < 0.49)
-                              Positioned.fill(
-                                child: IgnorePointer(
-                                  child: Container(
-                                    color: Colors.black.withValues(
-                                      alpha: (0.5 - _brightness) * 1.4,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    if (_recognition != null)
-                      Positioned.fill(
-                        child: _buildRecognitionOverlay(),
-                      ),
-                    // UI 层：在手势层之上，按钮和控件优先接收触摸
-                    SafeArea(
-                      child: Stack(
-                        children: [
-                          // 返回按钮（左上）
-                          // 闪光灯按钮（顶部中间）
-                          if (_imageBytes == null)
-                            Positioned(
-                              top: 18,
-                              left: 0,
-                              right: 0,
-                              child: Center(
-                                child: _buildFlashButton(),
-                              ),
-                            ),
-                          // 亮度调节指示器（右侧，滑动时显示）
-                          if (_isAdjustingBrightness)
-                            Positioned(
-                              right: 24,
-                              top: 0,
-                              bottom: 200,
-                              child: Center(
-                                child: _buildBrightnessIndicator(),
-                              ),
-                            ),
-                          // 对焦框已移除，避免拦截双指缩放手势
-                          if (_imageBytes == null)
-                            Positioned(
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              child: ValueListenableBuilder<double>(
-                                valueListenable: _zoomValue,
-                                builder: (context, zoomValue, _) =>
-                                    _CameraBottomControl(
-                                  imageBytes: _imageBytes,
-                                  currentZoom: zoomValue,
-                                  minZoomRatio: _minZoomRatio,
-                                  maxZoomRatio: _maxZoomRatio,
-                                  onZoomChanged: (newNormalizedZoom) {
-                                    _requestZoom(newNormalizedZoom);
-                                  },
-                                  onGallery: () => _openDefaultGallery(),
-                                  onShutter: () =>
-                                      _captureWithCamerawesome(cameraState),
-                                  onFlip: () async {
-                                    _pendingZoom = null;
-                                    _zoomValue.value = 0;
-                                    setState(() {
-                                      _imageBytes = null;
-                                      _frozenPreviewBytes = null;
-                                      _capturedImageSize = null;
-                                      _capturedImageMirrored = false;
-                                      _recognition = null;
-                                      _selectedCandidate = null;
-                                      _isFrontCamera = !_isFrontCamera;
-                                      _resultPanelHeight = 160;
-                                      _zoomInitialized = false;
-                                    });
-                                    await cameraState.switchCameraSensor(
-                                      aspectRatio:
-                                          cameraState.sensorConfig.aspectRatio,
-                                    );
-                                  },
-                                  isLoading: _isTakingPhoto,
-                                ),
-                              ),
-                            ),
-                          // Keep navigation above recognition and result overlays.
-                          Positioned(
-                            top: 18,
-                            left: 24,
-                            child: SizedBox(
-                              width: 60,
-                              child: _GlassToolbar(
-                                child: GestureDetector(
-                                  behavior: HitTestBehavior.opaque,
-                                  onTap: () => Navigator.of(context).maybePop(),
-                                  child: Center(
-                                    child: Icon(
-                                      Icons.arrow_back_ios_new,
-                                      color:
-                                          Colors.white.withValues(alpha: 0.92),
-                                      size: 20,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-          ),
-          YuqiaoFeatureAssistiveBall(
-            currentFeature: YuqiaoFeature.camera,
-            launcher: widget.featureLauncher,
-            bottomClearance: _imageBytes == null
-                ? _cameraControlsClearance + 18
-                : _resultPanelHeight + 42,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildFlashButton() {
-    return _GlassToolbar(
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // 闪光灯图标按钮
-          if (!_flashExpanded)
-            GestureDetector(
-              onTap: () {
-                if (_flashExpanded) {
-                  setState(() => _flashExpanded = false);
-                } else {
-                  setState(() => _flashExpanded = true);
-                }
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: EdgeInsets.symmetric(
-                  horizontal: _flashExpanded ? 10 : 0,
-                ),
-                child: Icon(
-                  _flashIcon(),
-                  color: Colors.white.withValues(alpha: 0.92),
-                  size: 22,
-                ),
-              ),
-            ),
-          // 展开的模式选项
-          if (_flashExpanded) ...[
-            _flashModeChip(FlashMode.none, '关', Icons.flash_off_rounded),
-            const SizedBox(width: 4),
-            _flashModeChip(FlashMode.on, '开', Icons.flash_on_rounded),
-            const SizedBox(width: 4),
-            _flashModeChip(FlashMode.auto, '自动', Icons.flash_auto_rounded),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _flashModeChip(FlashMode mode, String label, IconData _) {
-    final selected = _flashMode == mode;
-    final displayLabel = switch (mode) {
-      FlashMode.none => '关闭',
-      FlashMode.on => '开启',
-      FlashMode.auto => '自动',
-      FlashMode.always => '常亮',
-    };
-    return GestureDetector(
-      onTap: () => _setFlashMode(mode),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: selected
-              ? Colors.white.withValues(alpha: 0.25)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Text(
-          displayLabel,
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: selected ? 1.0 : 0.68),
-            fontSize: 12,
-            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildBrightnessIndicator() {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          width: 44,
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.35),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.12),
-            ),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.brightness_6_rounded,
-                color: Colors.white.withValues(alpha: 0.9),
-                size: 18,
-              ),
-              const SizedBox(height: 8),
-              // 垂直进度条
-              SizedBox(
-                height: 100,
-                child: Center(
-                  child: Container(
-                    width: 4,
-                    height: 100,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                    child: Align(
-                      alignment: Alignment.bottomCenter,
-                      child: Container(
-                        width: 4,
-                        height: 100 * _brightness,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.85),
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '${(_brightness * 100).round()}',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.9),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildRecognitionOverlay() {
-    return FutureBuilder<ObjectRecognition>(
-      future: _recognition,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
-          return Center(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                child: Container(
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.45),
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.14),
-                    ),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 36,
-                        height: 36,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 3,
-                          valueColor: AlwaysStoppedAnimation(
-                            Colors.white.withValues(alpha: 0.85),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'AI 识别中...',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.85),
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        }
-        if (snapshot.hasError) {
-          return _buildRecognitionFallback(
-            title: '识别失败',
-            message: snapshot.error.toString(),
-          );
-        }
-
-        final recognition = snapshot.data!;
-        return _buildResultPanel(recognition);
-      },
-    );
-  }
-
-  void _retryRecognition() {
-    final bytes = _imageBytes;
-    if (bytes == null) return;
-    setState(() {
-      _selectedCandidate = null;
-      _recognition = _recognizeImage(bytes);
-    });
-  }
-
-  Widget _buildRecognitionFallback({
-    required String title,
-    required String message,
-  }) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(24),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-            child: Container(
-              constraints: const BoxConstraints(maxWidth: 420),
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.48),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.16),
-                ),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.image_search_rounded,
-                    size: 42,
-                    color: Colors.white,
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    message,
-                    maxLines: 4,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.76),
-                      fontSize: 13,
-                      height: 1.4,
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: [
-                      _buildRecoveryButton(
-                        icon: Icons.refresh_rounded,
-                        label: '重试',
-                        onTap: _retryRecognition,
-                      ),
-                      _buildRecoveryButton(
-                        icon: Icons.camera_alt_rounded,
-                        label: '重新拍摄',
-                        onTap: _resetForRetake,
-                      ),
-                      _buildRecoveryButton(
-                        icon: Icons.photo_library_rounded,
-                        label: '从相册选择',
-                        onTap: _openDefaultGallery,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildRecoveryButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-  }) {
-    return Material(
-      color: Colors.white.withValues(alpha: 0.16),
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 18, color: Colors.white),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildResultPanel(ObjectRecognition recognition) {
-    final candidates = recognition.candidates;
-    if (candidates.isEmpty) {
-      return _buildRecognitionFallback(
-        title: '没有识别到物品',
-        message: '可以重新拍摄、重试识别，或从相册选择另一张照片。',
-      );
-    }
-    return _InteractiveBoundingBoxes(
-      candidates: candidates,
-      imageSize: _capturedImageSize,
-      mirrored: _capturedImageMirrored,
-      colors: _labelColors,
-      onSelected: _openObjectDetails,
-    );
-  }
-
-  Future<void> _openObjectDetails(ObjectCandidate candidate) async {
-    final bytes = _imageBytes;
-    if (bytes == null) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => CameraObjectDetailPage(
-          candidate: candidate,
-          imageBytes: bytes,
-          mirrored: _capturedImageMirrored,
-          initiallySaved: candidate.personalObjectId.isNotEmpty ||
-              _personalObjects.any(
-                (item) => item.displayName == candidate.objectName,
-              ),
-          onSpeak: _speakText,
-          onGenerateSentence: (option) => _useExpression(
-            candidate,
-            option.phrase,
-            expressionType: option.type,
-          ),
-          onSave: () => _savePersonalObject(candidate),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLegacyResultPanel(ObjectRecognition recognition) {
-    final candidates = recognition.candidates;
-    if (candidates.isEmpty) {
-      return _buildRecognitionFallback(
-        title: '没有识别到物品',
-        message: '可以重新拍摄、重试识别，或从相册选择另一张照片。',
-      );
-    }
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final renderObject =
-          _resultPanelKey.currentContext?.findRenderObject() as RenderBox?;
-      if (renderObject == null || !renderObject.hasSize) return;
-      final nextHeight = renderObject.size.height;
-      if ((nextHeight - _resultPanelHeight).abs() < 1) return;
-      setState(() => _resultPanelHeight = nextHeight);
-    });
-
-    return Stack(
-      children: [
-        // 坐标标注层
-        Positioned.fill(
-          child: CustomPaint(
-            painter: _BBoxPainter(
-              candidates: candidates,
-              excludedBottom: _cameraControlsClearance + _resultPanelHeight + 8,
-            ),
-          ),
-        ),
-        // 底部结果面板
-        Align(
-          alignment: Alignment.bottomCenter,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(
-              12,
-              0,
-              12,
-              _cameraControlsClearance,
-            ),
-            child: ConstrainedBox(
-              key: _resultPanelKey,
-              constraints: BoxConstraints(
-                maxWidth: 560,
-                maxHeight: (MediaQuery.sizeOf(context).height -
-                        _cameraControlsClearance -
-                        120)
-                    .clamp(180.0, 440.0),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(28),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-                  child: Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(28),
-                      color: const Color(0xFF98A5AD).withValues(alpha: 0.35),
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.14),
-                        width: 1,
-                      ),
-                    ),
-                    child: SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // 标题
-                          Row(
-                            children: [
-                              Icon(Icons.auto_awesome_rounded,
-                                  size: 18,
-                                  color: Colors.white.withValues(alpha: 0.8)),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  '图中识别到 ${candidates.length} 个物品',
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: Colors.white.withValues(alpha: 0.92),
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          // 每个物品及其表达
-                          for (int i = 0; i < candidates.length; i++) ...[
-                            if (i > 0)
-                              Padding(
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 8),
-                                child: Divider(
-                                    height: 1,
-                                    color:
-                                        Colors.white.withValues(alpha: 0.10)),
-                              ),
-                            _buildObjectSection(candidates[i], i),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  static const _labelColors = [
-    Color(0xFF6CB4FF),
-    Color(0xFF81C784),
-    Color(0xFFFFD54F),
-    Color(0xFFFF8A65),
-    Color(0xFFCE93D8),
-  ];
-
-  Widget _buildObjectSection(ObjectCandidate candidate, int index) {
-    final color = _labelColors[index % _labelColors.length];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // 物品名称
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Semantics(
-              button: true,
-              label: '播报${candidate.objectName}',
-              child: Material(
-                color: color.withValues(alpha: 0.35),
-                borderRadius: BorderRadius.circular(10),
-                child: InkWell(
-                  onTap: () => _speakObject(candidate),
-                  borderRadius: BorderRadius.circular(10),
-                  child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.volume_up_rounded,
-                          size: 18,
-                          color: Colors.white.withValues(alpha: 0.92),
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          candidate.objectName,
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.95),
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            if (candidate.personalObjectId.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.16),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.verified_rounded, size: 16, color: Colors.white),
-                    SizedBox(width: 5),
-                    Text(
-                      '我的物品',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
-                ),
-              )
-            else if (!_personalObjects.any(
-              (item) => item.displayName == candidate.objectName,
-            ))
-              Material(
-                color: Colors.white.withValues(alpha: 0.14),
-                borderRadius: BorderRadius.circular(10),
-                child: InkWell(
-                  onTap: () => _savePersonalObject(candidate),
-                  borderRadius: BorderRadius.circular(10),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.bookmark_add_rounded,
-                          size: 17,
-                          color: Colors.white,
-                        ),
-                        SizedBox(width: 5),
-                        Text(
-                          '记住它',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            const SizedBox(width: 8),
-            // 表达按钮
-            ...candidate.expressions.take(3).map((expr) {
-              return Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: GestureDetector(
-                  onTap: () => _useExpression(candidate, expr),
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: color.withValues(alpha: 0.4),
-                      ),
-                    ),
-                    child: Text(
-                      expr,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.92),
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            }),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-class _InteractiveBoundingBoxes extends StatelessWidget {
-  const _InteractiveBoundingBoxes({
-    required this.candidates,
-    required this.imageSize,
-    required this.mirrored,
-    required this.colors,
-    required this.onSelected,
-  });
-
-  final List<ObjectCandidate> candidates;
-  final Size? imageSize;
-  final bool mirrored;
-  final List<Color> colors;
-  final ValueChanged<ObjectCandidate> onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
-        final markers = _buildMarkerLayouts(canvasSize);
-        final labels = _layoutLabels(canvasSize, markers);
-        return Stack(
-          clipBehavior: Clip.hardEdge,
-          children: [
-            Positioned.fill(
-              child: IgnorePointer(
-                child: CustomPaint(
-                  painter: _ObjectBoxesPainter(markers: markers),
-                ),
-              ),
-            ),
-            Positioned.fill(
-              child: IgnorePointer(
-                child: CustomPaint(
-                  painter: _ObjectLeaderLinePainter(
-                    markers: markers,
-                    labels: labels,
-                  ),
-                ),
-              ),
-            ),
-            for (final marker in markers) _buildTapTarget(marker),
-            for (var index = 0; index < markers.length; index++)
-              _buildFloatingLabel(markers[index], labels[index]),
-          ],
-        );
-      },
-    );
-  }
-
-  List<_ObjectMarkerLayout> _buildMarkerLayouts(Size canvasSize) {
-    final markers = <_ObjectMarkerLayout>[];
-    for (int index = 0; index < candidates.length; index++) {
-      final candidate = candidates[index];
-      var rect = _displayRect(canvasSize, candidate, index);
-      final duplicatesExistingBox = markers.any((previous) {
-        return _rectIou(previous.rect, rect) > 0.82 &&
-            (previous.rect.center - rect.center).distance < 16;
-      });
-      if (duplicatesExistingBox) {
-        rect = _fallbackDisplayRect(canvasSize, index);
-      }
-      var overlapLevel = 0;
-      for (final previous in markers) {
-        if (_rectIou(previous.rect, rect) > 0.46 ||
-            (previous.rect.center - rect.center).distance < 28) {
-          overlapLevel++;
-        }
-      }
-      final tapRect = Rect.fromCenter(
-        center: rect.center,
-        width: math.max(rect.width, 52),
-        height: math.max(rect.height, 52),
-      ).intersect(Offset.zero & canvasSize);
-      markers.add(_ObjectMarkerLayout(
-        candidate: candidate,
-        rect: rect,
-        tapRect: tapRect,
-        color: colors[index % colors.length],
-        overlapLevel: overlapLevel,
-      ));
-    }
-    return markers;
-  }
-
-  List<Rect> _layoutLabels(
-    Size canvasSize,
-    List<_ObjectMarkerLayout> markers,
-  ) {
-    final order = [
-      for (int index = 0; index < markers.length; index++) index,
-    ]..sort((a, b) => markers[a].rect.top.compareTo(markers[b].rect.top));
-    final labels = List<Rect>.filled(markers.length, Rect.zero);
-    final placed = <Rect>[];
-    final minTop = math.min(92.0, canvasSize.height * 0.12);
-    final maxTop = math.max(minTop, canvasSize.height - 54);
-
-    for (final index in order) {
-      final marker = markers[index];
-      final width = _labelWidth(canvasSize, marker.candidate.objectName);
-      const height = 34.0;
-      final left = marker.rect.left
-          .clamp(8.0, math.max(8.0, canvasSize.width - width - 8))
-          .toDouble();
-      var top = (marker.rect.top - height - 6).clamp(minTop, maxTop).toDouble();
-      var label = Rect.fromLTWH(left, top, width, height);
-      var guard = 0;
-      while (
-          placed.any((item) => item.inflate(5).overlaps(label)) && guard < 8) {
-        top = (top + height + 8).clamp(minTop, maxTop).toDouble();
-        label = Rect.fromLTWH(left, top, width, height);
-        guard++;
-      }
-      if (placed.any((item) => item.inflate(5).overlaps(label))) {
-        top = (marker.rect.bottom + 8).clamp(minTop, maxTop).toDouble();
-        label = Rect.fromLTWH(left, top, width, height);
-      }
-      labels[index] = label;
-      placed.add(label);
-    }
-    return labels;
-  }
-
-  double _labelWidth(Size canvasSize, String text) {
-    final estimated = text.runes.length * 15.0 + 42;
-    return estimated
-        .clamp(82.0, math.min(190.0, canvasSize.width * 0.58))
-        .toDouble();
-  }
-
-  Widget _buildTapTarget(_ObjectMarkerLayout marker) {
-    return Positioned.fromRect(
-      rect: marker.tapRect,
-      child: Semantics(
-        button: true,
-        label: '查看${marker.candidate.objectName}的表达',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => onSelected(marker.candidate),
-          child: const SizedBox.expand(),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFloatingLabel(_ObjectMarkerLayout marker, Rect labelRect) {
-    return Positioned(
-      left: labelRect.left,
-      top: labelRect.top,
-      child: GestureDetector(
-        onTap: () => onSelected(marker.candidate),
-        child: Container(
-          width: labelRect.width,
-          height: labelRect.height,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          decoration: BoxDecoration(
-            color: marker.color.withValues(alpha: 0.94),
-            borderRadius: BorderRadius.circular(9),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.72),
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.18),
-                blurRadius: 10,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Flexible(
-                child: Text(
-                  marker.candidate.objectName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 4),
-              const Icon(
-                Icons.chevron_right_rounded,
-                color: Colors.white,
-                size: 17,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  double _rectIou(Rect a, Rect b) {
-    final left = math.max(a.left, b.left);
-    final top = math.max(a.top, b.top);
-    final right = math.min(a.right, b.right);
-    final bottom = math.min(a.bottom, b.bottom);
-    final intersection =
-        math.max(0.0, right - left) * math.max(0.0, bottom - top);
-    final union = a.width * a.height + b.width * b.height - intersection;
-    if (union <= 0) return 0;
-    return intersection / union;
-  }
-
-  List<Widget> buildMarkerLegacy(
-    Size canvasSize,
-    ObjectCandidate candidate,
-    int index,
-  ) {
-    final color = colors[index % colors.length];
-    final rect = _displayRect(canvasSize, candidate, index);
-    final tapRect = Rect.fromCenter(
-      center: rect.center,
-      width: math.max(rect.width, 48),
-      height: math.max(rect.height, 48),
-    ).intersect(Offset.zero & canvasSize);
-    final labelTop = math.max(6.0, rect.top - 34);
-
-    return [
-      Positioned.fromRect(
-        rect: tapRect,
-        child: Semantics(
-          button: true,
-          label: '查看${candidate.objectName}的表达',
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => onSelected(candidate),
-            child: CustomPaint(
-              painter: _ObjectBoxPainter(
-                color: color,
-                boxRect: Rect.fromLTWH(
-                  rect.left - tapRect.left,
-                  rect.top - tapRect.top,
-                  rect.width,
-                  rect.height,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-      Positioned(
-        left: rect.left.clamp(6.0, math.max(6.0, canvasSize.width - 80)),
-        top: labelTop,
-        child: GestureDetector(
-          onTap: () => onSelected(candidate),
-          child: Container(
-            constraints: BoxConstraints(maxWidth: canvasSize.width * 0.55),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.94),
-              borderRadius: BorderRadius.circular(9),
-              border: Border.all(
-                color: Colors.white.withValues(alpha: 0.72),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.18),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: Text(
-                    candidate.objectName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 4),
-                const Icon(
-                  Icons.chevron_right_rounded,
-                  color: Colors.white,
-                  size: 17,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    ];
-  }
-
-  Rect _displayRect(
-    Size canvasSize,
-    ObjectCandidate candidate,
-    int index,
-  ) {
-    final bbox = candidate.bbox;
-    if (bbox == null || bbox.length != 4 || imageSize == null) {
-      return _fallbackDisplayRect(canvasSize, index);
-    }
-
-    final source = imageSize!;
-    final fitted = applyBoxFit(
-      BoxFit.contain,
-      source,
-      canvasSize,
-    );
-    final sourceRect = Alignment.center.inscribe(
-      fitted.source,
-      Offset.zero & source,
-    );
-    final destinationRect = Alignment.center.inscribe(
-      fitted.destination,
-      Offset.zero & canvasSize,
-    );
-    final rawLeft = mirrored ? 1000 - bbox[2] : bbox[0];
-    final rawRight = mirrored ? 1000 - bbox[0] : bbox[2];
-    final sourceLeft = rawLeft / 1000 * source.width;
-    final sourceTop = bbox[1] / 1000 * source.height;
-    final sourceRight = rawRight / 1000 * source.width;
-    final sourceBottom = bbox[3] / 1000 * source.height;
-    final rect = Rect.fromLTRB(
-      destinationRect.left +
-          (sourceLeft - sourceRect.left) /
-              sourceRect.width *
-              destinationRect.width,
-      destinationRect.top +
-          (sourceTop - sourceRect.top) /
-              sourceRect.height *
-              destinationRect.height,
-      destinationRect.left +
-          (sourceRight - sourceRect.left) /
-              sourceRect.width *
-              destinationRect.width,
-      destinationRect.top +
-          (sourceBottom - sourceRect.top) /
-              sourceRect.height *
-              destinationRect.height,
-    );
-    return rect.intersect(Offset.zero & canvasSize);
-  }
-
-  Rect _fallbackDisplayRect(Size canvasSize, int index) {
-    final width = math.min(180.0, canvasSize.width * 0.45);
-    final height = math.min(120.0, canvasSize.height * 0.18);
-    final column = index % 2;
-    final row = index ~/ 2;
-    final left = (canvasSize.width - width) / 2 + column * 32 - 16;
-    final top = canvasSize.height * 0.24 + row * (height + 18);
-    return Rect.fromLTWH(left, top, width, height)
-        .intersect(Offset.zero & canvasSize);
-  }
-}
-
-class _ObjectBoxPainter extends CustomPainter {
-  const _ObjectBoxPainter({required this.color, required this.boxRect});
-
-  final Color color;
-  final Rect boxRect;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rounded = RRect.fromRectAndRadius(boxRect, const Radius.circular(10));
-    canvas.drawRRect(
-      rounded,
-      Paint()
-        ..color = color.withValues(alpha: 0.12)
-        ..style = PaintingStyle.fill,
-    );
-    canvas.drawRRect(
-      rounded,
-      Paint()
-        ..color = color
-        ..strokeWidth = 2.5
-        ..style = PaintingStyle.stroke,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _ObjectBoxPainter oldDelegate) {
-    return oldDelegate.color != color || oldDelegate.boxRect != boxRect;
-  }
-}
-
-class _ObjectMarkerLayout {
-  const _ObjectMarkerLayout({
-    required this.candidate,
-    required this.rect,
-    required this.tapRect,
-    required this.color,
-    required this.overlapLevel,
-  });
-
-  final ObjectCandidate candidate;
-  final Rect rect;
-  final Rect tapRect;
-  final Color color;
-  final int overlapLevel;
-}
-
-class _ObjectBoxesPainter extends CustomPainter {
-  const _ObjectBoxesPainter({required this.markers});
-
-  final List<_ObjectMarkerLayout> markers;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    for (final marker in markers) {
-      final inset = math.min(marker.overlapLevel * 3.0, 9.0);
-      final rect = marker.rect.deflate(
-        math.min(inset, marker.rect.shortestSide / 6),
-      );
-      final rounded = RRect.fromRectAndRadius(
-        rect,
-        const Radius.circular(11),
-      );
-      canvas.drawRRect(
-        rounded,
-        Paint()
-          ..color = marker.color.withValues(alpha: 0.08)
-          ..style = PaintingStyle.fill,
-      );
-      canvas.drawRRect(
-        rounded,
-        Paint()
-          ..color = marker.color.withValues(alpha: 0.98)
-          ..strokeWidth = 2.2
-          ..style = PaintingStyle.stroke,
-      );
-      if (marker.overlapLevel > 0) {
-        canvas.drawCircle(
-          rect.topLeft + const Offset(9, 9),
-          4,
-          Paint()..color = marker.color.withValues(alpha: 0.95),
-        );
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _ObjectBoxesPainter oldDelegate) {
-    return oldDelegate.markers != markers;
-  }
-}
-
-class _ObjectLeaderLinePainter extends CustomPainter {
-  const _ObjectLeaderLinePainter({
-    required this.markers,
-    required this.labels,
-  });
-
-  final List<_ObjectMarkerLayout> markers;
-  final List<Rect> labels;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    for (var index = 0;
-        index < markers.length && index < labels.length;
-        index++) {
-      final marker = markers[index];
-      final label = labels[index];
-      final boxAnchor = marker.rect.center;
-      final labelAnchor = Offset(label.left + 18, label.center.dy);
-      if ((boxAnchor - labelAnchor).distance < 34) continue;
-      final path = Path()
-        ..moveTo(labelAnchor.dx, labelAnchor.dy)
-        ..quadraticBezierTo(
-          (labelAnchor.dx + boxAnchor.dx) / 2,
-          labelAnchor.dy,
-          boxAnchor.dx,
-          boxAnchor.dy,
-        );
-      canvas.drawPath(
-        path,
-        Paint()
-          ..color = marker.color.withValues(alpha: 0.72)
-          ..strokeWidth = 1.4
-          ..style = PaintingStyle.stroke,
-      );
-      canvas.drawCircle(
-        boxAnchor,
-        3,
-        Paint()..color = marker.color.withValues(alpha: 0.90),
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _ObjectLeaderLinePainter oldDelegate) {
-    return oldDelegate.markers != markers || oldDelegate.labels != labels;
-  }
-}
-
-class CameraObjectDetailPage extends StatefulWidget {
-  const CameraObjectDetailPage({
-    super.key,
-    required this.candidate,
-    required this.imageBytes,
-    required this.mirrored,
-    required this.initiallySaved,
-    required this.onSpeak,
-    required this.onGenerateSentence,
-    required this.onSave,
-  });
-
-  final ObjectCandidate candidate;
-  final Uint8List imageBytes;
-  final bool mirrored;
-  final bool initiallySaved;
-  final Future<void> Function(String text) onSpeak;
-  final ValueChanged<ObjectExpressionOption> onGenerateSentence;
-  final Future<bool> Function() onSave;
-
-  @override
-  State<CameraObjectDetailPage> createState() => _CameraObjectDetailPageState();
-}
-
-class _CameraObjectDetailPageState extends State<CameraObjectDetailPage> {
-  late bool _saved;
-  bool _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _saved = widget.initiallySaved;
-  }
-
-  Future<void> _save() async {
-    if (_saving || _saved) return;
-    setState(() => _saving = true);
-    final saved = await widget.onSave();
-    if (!mounted) return;
-    setState(() {
-      _saving = false;
-      _saved = saved;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final candidate = widget.candidate;
-    final expressionOptions = candidate.effectiveExpressionOptions;
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F7FB),
-      body: CustomScrollView(
-        slivers: [
-          SliverAppBar(
-            pinned: true,
-            expandedHeight: 290,
-            backgroundColor: const Color(0xFFF4F7FB),
-            surfaceTintColor: Colors.transparent,
-            leading: Padding(
-              padding: const EdgeInsets.all(7),
-              child: _DetailGlassButton(
-                icon: Icons.arrow_back_ios_new_rounded,
-                onTap: () => Navigator.of(context).pop(),
-              ),
-            ),
-            flexibleSpace: FlexibleSpaceBar(
-              background: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Transform.flip(
-                    flipX: widget.mirrored,
-                    child: Image.memory(
-                      widget.imageBytes,
-                      fit: BoxFit.cover,
-                      cacheWidth: 1080,
-                      gaplessPlayback: true,
-                    ),
-                  ),
-                  const DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [Colors.transparent, Color(0x88000000)],
-                        stops: [0.58, 1],
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    left: 22,
-                    right: 22,
-                    bottom: 20,
-                    child: Text(
-                      candidate.objectName,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 32,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(18, 18, 18, 32),
-            sliver: SliverList.list(
-              children: [
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    if (candidate.category.isNotEmpty)
-                      _DetailTag(text: candidate.category),
-                    if (candidate.personalObjectId.isNotEmpty)
-                      const _DetailTag(
-                        text: '我的物品',
-                        icon: Icons.verified_rounded,
-                      ),
-                  ],
-                ),
-                if (candidate.visualDescription.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    candidate.visualDescription,
-                    style: const TextStyle(
-                      color: Color(0xFF6E6E73),
-                      fontSize: 15,
-                      height: 1.45,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 18),
-                SizedBox(
-                  height: 56,
-                  child: FilledButton.icon(
-                    onPressed: () => widget.onSpeak(candidate.objectName),
-                    icon: const Icon(Icons.volume_up_rounded),
-                    label: Text(
-                      '播报“${candidate.objectName}”',
-                      style: const TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF5974E8),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 26),
-                const Text(
-                  '你可能想说',
-                  style: TextStyle(
-                    color: Color(0xFF1C1C1E),
-                    fontSize: 21,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  '轻触句子直接播报，点击星光按钮可整理成完整表达。',
-                  style: TextStyle(color: Color(0xFF7A7A80), fontSize: 13),
-                ),
-                const SizedBox(height: 14),
-                for (int index = 0;
-                    index < expressionOptions.length;
-                    index++) ...[
-                  _ExpressionSuggestionTile(
-                    type: expressionOptions[index].type,
-                    phrase: expressionOptions[index].phrase,
-                    color: _CameraWordPageState._labelColors[
-                        index % _CameraWordPageState._labelColors.length],
-                    onSpeak: () =>
-                        widget.onSpeak(expressionOptions[index].phrase),
-                    onGenerate: () =>
-                        widget.onGenerateSentence(expressionOptions[index]),
-                  ),
-                  const SizedBox(height: 10),
-                ],
-                const SizedBox(height: 14),
-                OutlinedButton.icon(
-                  onPressed: _saved || _saving ? null : _save,
-                  icon: Icon(
-                    _saved
-                        ? Icons.bookmark_added_rounded
-                        : Icons.bookmark_add_rounded,
-                  ),
-                  label: Text(
-                    _saved
-                        ? '已保存到我的物品'
-                        : _saving
-                            ? '正在保存…'
-                            : '记住这个物品',
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size.fromHeight(52),
-                    foregroundColor: const Color(0xFF4E61B8),
-                    side: const BorderSide(color: Color(0xFFCAD2F6)),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DetailGlassButton extends StatelessWidget {
-  const _DetailGlassButton({required this.icon, required this.onTap});
-
-  final IconData icon;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipOval(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-        child: Material(
-          color: Colors.white.withValues(alpha: 0.24),
-          child: InkWell(
-            onTap: onTap,
-            child: Icon(icon, color: Colors.white, size: 19),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _DetailTag extends StatelessWidget {
-  const _DetailTag({required this.text, this.icon});
-
-  final String text;
-  final IconData? icon;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.78),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (icon != null) ...[
-            Icon(icon, size: 16, color: const Color(0xFF5974E8)),
-            const SizedBox(width: 5),
-          ],
-          Text(
-            text,
-            style: const TextStyle(
-              color: Color(0xFF4A4A50),
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ExpressionSuggestionTile extends StatelessWidget {
-  const _ExpressionSuggestionTile({
-    required this.type,
-    required this.phrase,
-    required this.color,
-    required this.onSpeak,
-    required this.onGenerate,
-  });
-
-  final String type;
-  final String phrase;
-  final Color color;
-  final VoidCallback onSpeak;
-  final VoidCallback onGenerate;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.white.withValues(alpha: 0.82),
-      borderRadius: BorderRadius.circular(16),
-      child: InkWell(
-        onTap: onSpeak,
-        borderRadius: BorderRadius.circular(16),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 68),
-          padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: color.withValues(alpha: 0.34)),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.18),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(Icons.volume_up_rounded, color: color, size: 20),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      type.isEmpty ? '表达' : type,
-                      style: TextStyle(
-                        color: color,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      phrase,
-                      style: const TextStyle(
-                        color: Color(0xFF252529),
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                tooltip: '生成完整句',
-                onPressed: onGenerate,
-                icon: const Icon(
-                  Icons.auto_awesome_rounded,
-                  color: Color(0xFF6577D8),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _BBoxPainter extends CustomPainter {
-  final List<ObjectCandidate> candidates;
-  final double excludedBottom;
-
-  _BBoxPainter({
-    required this.candidates,
-    required this.excludedBottom,
-  });
-
-  static const _colors = [
-    Color(0xFF6CB4FF),
-    Color(0xFF81C784),
-    Color(0xFFFFD54F),
-    Color(0xFFFF8A65),
-    Color(0xFFCE93D8),
-  ];
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final visibleHeight =
-        (size.height - excludedBottom).clamp(0.0, size.height);
-    canvas.save();
-    canvas.clipRect(Rect.fromLTWH(0, 0, size.width, visibleHeight));
-    for (int i = 0; i < candidates.length; i++) {
-      final candidate = candidates[i];
-      final bbox = candidate.bbox;
-      if (bbox == null || bbox.length != 4) continue;
-
-      final color = _colors[i % _colors.length];
-      // 归一化坐标 (0-1000) → 像素坐标
-      final x1 = bbox[0] / 1000 * size.width;
-      final y1 = bbox[1] / 1000 * size.height;
-      final x2 = bbox[2] / 1000 * size.width;
-      final y2 = bbox[3] / 1000 * size.height;
-
-      final rect = Rect.fromLTRB(x1, y1, x2, y2);
-
-      // 半透明填充
-      final fillPaint = Paint()
-        ..color = color.withValues(alpha: 0.12)
-        ..style = PaintingStyle.fill;
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(rect, const Radius.circular(8)),
-        fillPaint,
-      );
-
-      // 边框
-      final strokePaint = Paint()
-        ..color = color.withValues(alpha: 0.8)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.5;
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(rect, const Radius.circular(8)),
-        strokePaint,
-      );
-
-      // 标签背景
-      final labelText = candidate.objectName;
-      final textPainter = TextPainter(
-        text: TextSpan(
-          text: labelText,
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 13,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-
-      final labelW = textPainter.width + 16;
-      final labelH = textPainter.height + 8;
-      final labelRect = Rect.fromLTWH(x1, y1 - labelH - 2, labelW, labelH);
-
-      final labelBgPaint = Paint()..color = color.withValues(alpha: 0.90);
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(labelRect, const Radius.circular(6)),
-        labelBgPaint,
-      );
-
-      textPainter.paint(canvas, Offset(x1 + 8, y1 - labelH + 2));
-    }
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(covariant _BBoxPainter oldDelegate) {
-    return oldDelegate.candidates != candidates ||
-        oldDelegate.excludedBottom != excludedBottom;
-  }
-}
-
-// Camera overlay components adapted from photos_test.dart; preview is provided by CamerAwesome.
-
-class _CameraBootView extends StatelessWidget {
-  const _CameraBootView();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Colors.black,
-      child: Center(
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(22),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.10),
-                borderRadius: BorderRadius.circular(22),
-                border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.4,
-                      color: Colors.white.withValues(alpha: 0.88),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    '\u6B63\u5728\u542F\u52A8\u76F8\u673A',
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.88),
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CameraOverlayGradient extends StatelessWidget {
-  const _CameraOverlayGradient();
-
-  @override
-  Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Colors.black.withValues(alpha: 0.14),
-              Colors.transparent,
-              Colors.transparent,
-              Colors.black.withValues(alpha: 0.22),
-            ],
-            stops: const [0.0, 0.18, 0.58, 1.0],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _GlassToolbar extends StatelessWidget {
-  final Widget child;
-  const _GlassToolbar({required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(22),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-        child: Container(
-          height: 60,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          decoration: BoxDecoration(
-            color: const Color(0xFF7E8790).withValues(alpha: 0.42),
-            borderRadius: BorderRadius.circular(22),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.14),
-              width: 1,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.08),
-                blurRadius: 18,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: child,
-        ),
-      ),
-    );
-  }
-}
-
-class _ToolbarIcon extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback? onTap;
-  const _ToolbarIcon({required this.icon, this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: SizedBox(
-        width: 32,
-        child: Center(
-          child: Icon(
-            icon,
-            color: Colors.white.withValues(alpha: 0.92),
-            size: 22,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class FocusFrame extends StatelessWidget {
-  final double size;
-  const FocusFrame({super.key, this.size = 140});
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(
-      size: Size.square(size),
-      painter: _FocusFramePainter(),
-    );
-  }
-}
-
-class _FocusFramePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.92)
-      ..strokeWidth = 2.2
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    const corner = 24.0;
-    final r = Rect.fromLTWH(0, 0, size.width, size.height);
-    canvas.drawLine(r.topLeft, Offset(r.left + corner, r.top), paint);
-    canvas.drawLine(r.topLeft, Offset(r.left, r.top + corner), paint);
-    canvas.drawLine(
-        Offset(r.right - corner, r.top), Offset(r.right, r.top), paint);
-    canvas.drawLine(r.topRight, Offset(r.right, r.top + corner), paint);
-    canvas.drawLine(
-        Offset(r.left, r.bottom - corner), Offset(r.left, r.bottom), paint);
-    canvas.drawLine(
-        Offset(r.left, r.bottom), Offset(r.left + corner, r.bottom), paint);
-    canvas.drawLine(
-        Offset(r.right - corner, r.bottom), Offset(r.right, r.bottom), paint);
-    canvas.drawLine(
-        Offset(r.right, r.bottom - corner), Offset(r.right, r.bottom), paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class _CameraBottomControl extends StatefulWidget {
-  final Uint8List? imageBytes;
-  final double currentZoom; // normalized 0.0 - 1.0
-  final double minZoomRatio;
-  final double maxZoomRatio;
-  final ValueChanged<double>? onZoomChanged; // normalized 0.0 - 1.0
-  final VoidCallback onGallery;
-  final VoidCallback onShutter;
-  final VoidCallback onFlip;
-  final bool isLoading;
-
-  const _CameraBottomControl({
-    required this.imageBytes,
-    this.currentZoom = 0.0,
-    this.minZoomRatio = 1.0,
-    this.maxZoomRatio = 10.0,
-    this.onZoomChanged,
-    required this.onGallery,
-    required this.onShutter,
-    required this.onFlip,
-    required this.isLoading,
-  });
-
-  @override
-  State<_CameraBottomControl> createState() => _CameraBottomControlState();
-}
-
-class _CameraBottomControlState extends State<_CameraBottomControl> {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 6, 14, 8),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.transparent,
-            Colors.black.withValues(alpha: 0.04),
-            Colors.black.withValues(alpha: 0.14),
-          ],
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(28),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(14, 8, 14, 6),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(28),
-                  color: const Color(0xFF98A5AD).withValues(alpha: 0.32),
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.14),
-                    width: 1,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.08),
-                      blurRadius: 16,
-                      offset: const Offset(0, 8),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        GestureDetector(
-                          onTap: widget.onGallery,
-                          child: _buildSideButton(
-                            icon: Icons.photo_library_rounded,
-                            imageBytes: widget.imageBytes,
-                          ),
-                        ),
-                        const Spacer(),
-                        GestureDetector(
-                          onTap: widget.onShutter,
-                          child: _buildShutterButton(),
-                        ),
-                        const Spacer(),
-                        GestureDetector(
-                          onTap: widget.onFlip,
-                          child: _buildSideButton(
-                            icon: Icons.flip_camera_ios_rounded,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    _buildZoomRuler(),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSideButton({required IconData icon, Uint8List? imageBytes}) {
-    return ClipOval(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-        child: Container(
-          width: 46,
-          height: 46,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.white.withValues(alpha: 0.12),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.16),
-              width: 1,
-            ),
-          ),
-          child: imageBytes != null
-              ? ClipOval(child: Image.memory(imageBytes, fit: BoxFit.cover))
-              : Icon(
-                  icon,
-                  color: Colors.white.withValues(alpha: 0.92),
-                  size: 22,
-                ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildShutterButton() {
-    return Container(
-      width: 70,
-      height: 70,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Colors.white.withValues(alpha: 0.18),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.26),
-          width: 1,
-        ),
-      ),
-      child: Center(
-        child: Container(
-          width: 54,
-          height: 54,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.white.withValues(alpha: 0.92),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.08),
-                blurRadius: 12,
-                offset: const Offset(0, 5),
-              ),
-            ],
-          ),
-          child: widget.isLoading
-              ? const Center(
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Color(0xFF4A4A5A),
-                    ),
-                  ),
-                )
-              : null,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildZoomRuler() {
-    return _ZoomRulerWidget(
-      currentNormalizedZoom: widget.currentZoom,
-      minZoomRatio: widget.minZoomRatio,
-      maxZoomRatio: widget.maxZoomRatio,
-      onZoomChanged: widget.onZoomChanged,
-    );
-  }
-}
-
-/// \u72EC\u7ACB\u7684\u7F29\u653E\u6807\u5C3A\u7EC4\u4EF6\uFF0C\u907F\u514D\u62D6\u62FD\u65F6\u91CD\u5EFA\u6574\u4E2A\u5E95\u90E8\u63A7\u5236\u680F
-class _ZoomRulerWidget extends StatefulWidget {
-  final double currentNormalizedZoom;
-  final double minZoomRatio;
-  final double maxZoomRatio;
-  final ValueChanged<double>? onZoomChanged;
-
-  const _ZoomRulerWidget({
-    required this.currentNormalizedZoom,
-    required this.minZoomRatio,
-    required this.maxZoomRatio,
-    this.onZoomChanged,
-  });
-
-  @override
-  State<_ZoomRulerWidget> createState() => _ZoomRulerWidgetState();
-}
-
-class _ZoomRulerWidgetState extends State<_ZoomRulerWidget> {
-  bool _isDragging = false;
-  bool _showRatio = false;
-  Timer? _hideRatioTimer;
-  double _displayZoom = 0;
-  double _lastSentZoom = -1;
-
-  static const int _tickCount = 40;
-  static const double _rulerHeight = 28;
-
-  @override
-  void initState() {
-    super.initState();
-    _displayZoom = widget.currentNormalizedZoom;
-  }
-
-  @override
-  void didUpdateWidget(covariant _ZoomRulerWidget oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!_isDragging &&
-        (widget.currentNormalizedZoom - _displayZoom).abs() > 0.0005) {
-      _displayZoom = widget.currentNormalizedZoom;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _showRatioTemporarily();
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _hideRatioTimer?.cancel();
-    super.dispose();
-  }
-
-  double _normalizedToRatio(double normalized) {
-    return widget.minZoomRatio +
-        normalized * (widget.maxZoomRatio - widget.minZoomRatio);
-  }
-
-  String _formatRatio(double ratio) {
-    if ((ratio - ratio.round()).abs() < 0.05) return '${ratio.round()}x';
-    return '${ratio.toStringAsFixed(1)}x';
-  }
-
-  void _showRatioTemporarily() {
-    _hideRatioTimer?.cancel();
-    if (mounted && !_showRatio) setState(() => _showRatio = true);
-    _hideRatioTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted && !_isDragging) setState(() => _showRatio = false);
-    });
-  }
-
-  void _setZoomFromPosition(double dx, double width) {
-    if (width <= 0) return;
-    const edgeInset = 8.0;
-    final usableWidth = width - edgeInset * 2;
-    final newZoom = ((dx - edgeInset) / usableWidth).clamp(0.0, 1.0).toDouble();
-    setState(() => _displayZoom = newZoom);
-
-    // Keep the preview smooth by avoiding redundant platform-channel calls.
-    if (_lastSentZoom < 0 || (newZoom - _lastSentZoom).abs() >= 0.004) {
-      _lastSentZoom = newZoom;
-      widget.onZoomChanged?.call(newZoom);
-    }
-  }
-
-  void _onDragStart(DragStartDetails details, double width) {
-    _hideRatioTimer?.cancel();
-    setState(() {
-      _isDragging = true;
-      _showRatio = true;
-    });
-    _setZoomFromPosition(details.localPosition.dx, width);
-  }
-
-  void _onDragUpdate(DragUpdateDetails details, double width) {
-    _setZoomFromPosition(details.localPosition.dx, width);
-  }
-
-  void _onDragEnd(DragEndDetails details) {
-    final snappedZoom = (_displayZoom * _tickCount).round() / _tickCount;
-    setState(() {
-      _isDragging = false;
-      _displayZoom = snappedZoom;
-    });
-    _lastSentZoom = snappedZoom;
-    widget.onZoomChanged?.call(snappedZoom);
-    _showRatioTemporarily();
-  }
-
-  void _onTapDown(TapDownDetails details, double width) {
-    _setZoomFromPosition(details.localPosition.dx, width);
-    _showRatioTemporarily();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final displayRatio = _normalizedToRatio(_displayZoom);
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final width = constraints.maxWidth;
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (details) => _onTapDown(details, width),
-          onHorizontalDragStart: (details) => _onDragStart(details, width),
-          onHorizontalDragUpdate: (details) => _onDragUpdate(details, width),
-          onHorizontalDragEnd: _onDragEnd,
-          child: SizedBox(
-            height: 58,
-            child: Stack(
-              alignment: Alignment.topCenter,
-              children: [
-                AnimatedPositioned(
-                  duration: const Duration(milliseconds: 120),
-                  curve: Curves.easeOut,
-                  top: _showRatio ? 0 : 6,
-                  child: AnimatedOpacity(
-                    opacity: _showRatio ? 1 : 0,
-                    duration: const Duration(milliseconds: 160),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.42),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.18),
-                        ),
-                      ),
-                      child: Text(
-                        _formatRatio(displayRatio),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                          fontFeatures: [FontFeature.tabularFigures()],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: CustomPaint(
-                    size: const Size(double.infinity, _rulerHeight),
-                    painter: _ZoomRulerPainter(
-                      normalizedZoom: _displayZoom,
-                      isDragging: _isDragging,
-                      tickCount: _tickCount,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _ZoomRulerPainter extends CustomPainter {
-  final double normalizedZoom;
-  final bool isDragging;
-  final int tickCount;
-
-  _ZoomRulerPainter({
-    required this.normalizedZoom,
-    required this.isDragging,
-    required this.tickCount,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    const edgeInset = 8.0;
-    final usableWidth = size.width - edgeInset * 2;
-    final activeIndex = (normalizedZoom * tickCount).round();
-    final activeX = edgeInset + usableWidth * activeIndex / tickCount;
-    const centerY = 13.0;
-    final trackPaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.14)
-      ..strokeWidth = 1;
-    canvas.drawLine(
-      const Offset(edgeInset, centerY),
-      Offset(size.width - edgeInset, centerY),
-      trackPaint,
-    );
-
-    for (int i = 0; i <= tickCount; i++) {
-      final x = edgeInset + usableWidth * i / tickCount;
-      final isMajor = i % 5 == 0;
-      final isActive = i == activeIndex;
-      final height = isActive ? 22.0 : (isMajor ? 12.0 : 7.0);
-      final paint = Paint()
-        ..color = isActive
-            ? const Color(0xFFFFD45A)
-            : Colors.white.withValues(alpha: isMajor ? 0.58 : 0.30)
-        ..strokeWidth = isActive ? 3 : (isMajor ? 1.5 : 1)
-        ..strokeCap = StrokeCap.round;
-      canvas.drawLine(
-        Offset(x, centerY - height / 2),
-        Offset(x, centerY + height / 2),
-        paint,
-      );
-    }
-
-    final thumbPaint = Paint()..color = const Color(0xFFFFD45A);
-    canvas.drawCircle(Offset(activeX, centerY), isDragging ? 5 : 4, thumbPaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _ZoomRulerPainter oldDelegate) {
-    return normalizedZoom != oldDelegate.normalizedZoom ||
-        isDragging != oldDelegate.isDragging;
-  }
-}
-
 class ConfirmSpeakPage extends StatefulWidget {
   const ConfirmSpeakPage({
     super.key,
@@ -13497,1390 +9161,6 @@ class _ConfirmSpeakPageState extends State<ConfirmSpeakPage> {
   }
 }
 
-class QwenCancellationToken {
-  final Completer<void> _abortCompleter = Completer<void>();
-  bool _cancelled = false;
-
-  bool get isCancelled => _cancelled;
-  Future<void> get whenCancelled => _abortCompleter.future;
-
-  void cancel() {
-    if (_cancelled) return;
-    _cancelled = true;
-    _abortCompleter.complete();
-  }
-
-  void throwIfCancelled() {
-    if (_cancelled) throw const QwenCancelledException();
-  }
-}
-
-class _StructuredSentenceCandidate {
-  const _StructuredSentenceCandidate({
-    required this.sentence,
-    required this.evidence,
-    required this.assumptions,
-    required this.complete,
-  });
-
-  final String sentence;
-  final List<String> evidence;
-  final List<String> assumptions;
-  final bool complete;
-
-  static _StructuredSentenceCandidate? fromJson(Map<String, dynamic> json) {
-    final sentence = json['sentence'];
-    if (sentence is! String || sentence.trim().isEmpty) return null;
-    List<String> stringsOf(Object? value) => value is List
-        ? value
-            .whereType<String>()
-            .map((item) => item.trim())
-            .where((item) => item.isNotEmpty)
-            .toList()
-        : const [];
-    return _StructuredSentenceCandidate(
-      sentence: sentence.trim(),
-      evidence: stringsOf(json['evidence']),
-      assumptions: stringsOf(json['assumptions']),
-      complete: json['complete'] == true,
-    );
-  }
-}
-
-class _SentenceValidation {
-  const _SentenceValidation.valid(this.sentence) : reason = '';
-
-  const _SentenceValidation.invalid(this.reason) : sentence = null;
-
-  final String? sentence;
-  final String reason;
-}
-
-class QwenService {
-  final http.Client _client = http.Client();
-
-  static const String _apiKey = String.fromEnvironment('QWEN_API_KEY');
-  static const String _baseUrl = String.fromEnvironment(
-    'QWEN_BASE_URL',
-    defaultValue:
-        'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
-  );
-  static const String _textModel = String.fromEnvironment(
-    'QWEN_TEXT_MODEL',
-    defaultValue: 'qwen-plus',
-  );
-  static const String _recommendModel = String.fromEnvironment(
-    'QWEN_RECOMMEND_MODEL',
-    defaultValue: 'qwen-turbo',
-  );
-  static const String _visionModel = String.fromEnvironment(
-    'QWEN_VISION_MODEL',
-    defaultValue: 'qwen-vl-plus',
-  );
-
-  Future<List<String>> generateSentences(
-    ExpressionDraft draft, {
-    QwenCancellationToken? cancellationToken,
-  }) async {
-    _ensureConfigured();
-    final accepted = <String>[];
-    final rejectionReasons = <String>[];
-    Object? lastError;
-    for (var attempt = 0; attempt < 2 && accepted.length < 2; attempt++) {
-      cancellationToken?.throwIfCancelled();
-      try {
-        final response = await _requestStructuredSentences(
-          draft,
-          rejectionReasons: attempt == 0 ? const [] : rejectionReasons,
-          cancellationToken: cancellationToken,
-        );
-        final candidates = _parseStructuredSentenceCandidates(
-          _messageContent(response),
-        );
-        for (final candidate in candidates) {
-          final validation = _validateStructuredSentence(candidate, draft);
-          if (validation.sentence == null) {
-            rejectionReasons.add(validation.reason);
-            continue;
-          }
-          accepted.add(validation.sentence!);
-        }
-      } on QwenCancelledException {
-        rethrow;
-      } catch (error) {
-        lastError = error;
-        rejectionReasons.add('上次返回格式不稳定或候选句未通过校验，请严格返回 JSON');
-        yuqiaoDebugLog('[Qwen generateSentences] retryable failure: $error');
-      }
-    }
-    if (lastError != null) {
-      yuqiaoDebugLog(
-          '[Qwen generateSentences] recovered after retry: $lastError');
-    }
-    final seen = <String>{};
-    final sentences = <String>[];
-    for (final sentence in accepted) {
-      final normalized = sentence.replaceAll(RegExp(r'[，。！？、,.!?\s]'), '');
-      if (!seen.add(normalized)) continue;
-      sentences.add(sentence);
-      if (sentences.length == 3) break;
-    }
-    if (sentences.isEmpty) {
-      throw const FormatException('模型没有返回逻辑完整的候选句');
-    }
-    return sentences;
-  }
-
-  Future<Map<String, dynamic>> _requestStructuredSentences(
-    ExpressionDraft draft, {
-    required List<String> rejectionReasons,
-    QwenCancellationToken? cancellationToken,
-  }) {
-    return _post({
-      'model': _textModel,
-      'temperature': 0.15,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文失语症辅助沟通 App 的句子整理与语义校验模块。'
-              '每条候选必须是可独立播报、语法完整、逻辑通顺的中文句子。'
-              '区分两类信息：evidence 是输入中原文可找到的证据；assumptions 是为了补全表达而提出的新信息。'
-              '新人名、地点、数字、症状并非一律禁止，可以作为合理假设出现；'
-              '但有 assumptions 时，句子必须明确写成询问、请求、建议或可能性，不能把假设说成已经确认的事实。'
-              '例如“王医生在吗？”和“请帮我去三楼”可以保留；'
-              '没有依据时，“我已经吃了三片药”或“我得了某种病”不能保留。'
-              'evidence 必须填写输入里的简短原文片段，不能把推测伪装成证据。'
-              '不要机械拼接不同说话者的话，不要以“因为、但是、然后、我想”等未完成结构结束。'
-              '只返回 JSON 对象：'
-              '{"candidates":[{"sentence":"完整句子","intent":"询问或请求等","evidence":["输入原文"],"assumptions":["新增信息"],"complete":true}]}。',
-        },
-        {
-          'role': 'user',
-          'content': '来源：${draft.source}\n'
-              '表达方向：${draft.intent}\n'
-              '输入信息：${draft.keywords.join(' / ')}\n'
-              '${rejectionReasons.isEmpty ? '' : '上次未通过原因：${rejectionReasons.take(6).join('；')}\n'}'
-              '请生成 3 到 4 条简短、自然且彼此有区别的候选句。',
-        },
-      ],
-    }, cancellationToken: cancellationToken);
-  }
-
-  List<_StructuredSentenceCandidate> _parseStructuredSentenceCandidates(
-    String content,
-  ) {
-    Object decoded;
-    try {
-      decoded = jsonDecode(_stripCodeFence(content));
-    } catch (_) {
-      final recovered = _recoverStructuredSentenceCandidates(content);
-      if (recovered.isNotEmpty) return recovered;
-      rethrow;
-    }
-    if (decoded is! Map<String, dynamic> || decoded['candidates'] is! List) {
-      throw const QwenException('候选句返回格式错误，应为 JSON 对象。');
-    }
-    return (decoded['candidates'] as List)
-        .whereType<Map>()
-        .map((item) => _StructuredSentenceCandidate.fromJson(
-              Map<String, dynamic>.from(item),
-            ))
-        .whereType<_StructuredSentenceCandidate>()
-        .take(6)
-        .toList();
-  }
-
-  List<_StructuredSentenceCandidate> _recoverStructuredSentenceCandidates(
-    String content,
-  ) {
-    final cleaned = _stripCodeFence(content);
-    final results = <_StructuredSentenceCandidate>[];
-    final seen = <String>{};
-    final patterns = [
-      RegExp(r'"sentence"\s*:\s*"((?:\\.|[^"\\])*)"', dotAll: true),
-      RegExp(r'“sentence”\s*[:：]\s*“([^”]+)”', dotAll: true),
-    ];
-    for (final pattern in patterns) {
-      for (final match in pattern.allMatches(cleaned)) {
-        final raw = match.group(1);
-        if (raw == null || raw.trim().isEmpty) continue;
-        final sentence = _decodeJsonStringFragment(raw);
-        final normalized =
-            LocationRecommendationController.normalizeText(sentence);
-        if (normalized.isEmpty || !seen.add(normalized)) continue;
-        results.add(_StructuredSentenceCandidate(
-          sentence: sentence,
-          evidence: const [],
-          assumptions: const [],
-          complete: true,
-        ));
-        if (results.length == 6) return results;
-      }
-    }
-    return results;
-  }
-
-  String _decodeJsonStringFragment(String value) {
-    try {
-      final decoded = jsonDecode('"$value"');
-      if (decoded is String) return decoded.trim();
-    } catch (_) {}
-    return value
-        .replaceAll(r'\"', '"')
-        .replaceAll(r'\\', r'\')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-  }
-
-  _SentenceValidation _validateStructuredSentence(
-    _StructuredSentenceCandidate candidate,
-    ExpressionDraft draft,
-  ) {
-    if (!candidate.complete) {
-      return const _SentenceValidation.invalid('模型标记句子尚不完整');
-    }
-    final sentence = _validatedCompleteSentence(candidate.sentence);
-    if (sentence == null) {
-      return const _SentenceValidation.invalid('句子缺少必要成分或结尾不完整');
-    }
-    final source = LocationRecommendationController.normalizeText(
-      '${draft.source}${draft.intent}${draft.keywords.join()}',
-    );
-    for (final evidence in candidate.evidence) {
-      final normalizedEvidence =
-          LocationRecommendationController.normalizeText(evidence);
-      if (normalizedEvidence.isNotEmpty &&
-          !source.contains(normalizedEvidence)) {
-        return _SentenceValidation.invalid('证据“$evidence”在输入中不存在');
-      }
-    }
-    if (candidate.assumptions.isNotEmpty &&
-        !_isExplicitlyFramedAssumption(sentence)) {
-      return const _SentenceValidation.invalid(
-        '新增信息被写成了确定事实，应改为询问、请求、建议或可能性',
-      );
-    }
-    return _SentenceValidation.valid(sentence);
-  }
-
-  bool _isExplicitlyFramedAssumption(String sentence) {
-    const markers = [
-      '吗',
-      '是不是',
-      '是否',
-      '可能',
-      '也许',
-      '大概',
-      '要不要',
-      '可以',
-      '能不能',
-      '请',
-      '帮我',
-      '麻烦',
-      '我想',
-      '我要',
-      '我需要',
-    ];
-    return markers.any(sentence.contains) || sentence.endsWith('？');
-  }
-
-  String? _validatedCompleteSentence(String value) {
-    var sentence = value
-        .trim()
-        .replaceFirst(RegExp(r'^\s*\d+[.、）)]\s*'), '')
-        .replaceAll(RegExp(r'^["“”]+|["“”]+$'), '')
-        .trim();
-    if (sentence.length < 4 || sentence.length > 48) return null;
-    if (sentence.contains('对话上下文：') || sentence.contains('用户已确认关键词：')) {
-      return null;
-    }
-    final withoutPunctuation =
-        sentence.replaceAll(RegExp(r'[，。！？、,.!?：:；;\s]+$'), '');
-    const incompleteEndings = [
-      '因为',
-      '但是',
-      '然后',
-      '还有',
-      '所以',
-      '如果',
-      '我想',
-      '我要',
-      '我需要',
-      '能不能',
-      '帮我',
-      '给我',
-    ];
-    if (incompleteEndings.any(withoutPunctuation.endsWith)) return null;
-    if (!RegExp(r'[。！？!?]$').hasMatch(sentence)) {
-      sentence = '$sentence。';
-    }
-    return sentence;
-  }
-
-  Future<List<String>> recommendNextOptions(
-      CandidateRecommendationRequest request) async {
-    _ensureConfigured();
-    yuqiaoDebugLog(
-      '[Qwen recommendNextOptions] intent=${request.intent}, '
-      'step=${request.stepTitle}, selected=${request.selectedKeywords.join('/')}, '
-      'excluded=${request.excludeOptions.length}',
-    );
-    final response = await _post({
-      'model': _recommendModel,
-      'temperature': 0.35,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文失语症辅助沟通 App 的候选词推荐模块。'
-              '你的任务不是生成完整句子，而是预测用户下一步最可能想点的短候选词。'
-              '必须紧扣“已确认内容”和“当前页面问题”，候选之间要有明显上下文关联。'
-              '每个候选不超过 6 个汉字，适合按钮展示。'
-              '除非本地兜底候选非常合适，否则不要简单照抄本地兜底候选。'
-              '一次提供 8 到 12 个不重复候选，供界面分组展示。'
-              '输出必须是 JSON 字符串数组，例如 ["医生","护士","家人","朋友","护工","老师","同事","康复师"]。',
-        },
-        {
-          'role': 'user',
-          'content': '表达方向：${request.intent}\n'
-              '当前页面问题：${request.stepTitle}\n'
-              '已确认内容：${request.selectedKeywords.join(' / ')}\n'
-              '本地兜底候选：${request.fallbackOptions.join(' / ')}\n'
-              '个人日常词库：${request.personalWords.join(' / ')}\n'
-              '${request.excludeOptions.isEmpty ? '' : '不要推荐以下已出现过的词：${request.excludeOptions.join(' / ')}\n'}'
-              '推荐要求：优先贴近日常生活表达，必要时使用个人词库中的人物、饮食、地点、活动、物品或常用句；'
-              '不要过度偏向药品或重度照护场景，除非上下文明确提到身体不适或医疗问题。'
-              '请尽量返回 8 到 12 个彼此不同的候选。\n'
-              '请只返回下一步候选词 JSON 数组。',
-        },
-      ],
-    });
-    final options = _parseStringList(_messageContent(response))
-        .map(_normalizeOption)
-        .where((item) => item.isNotEmpty)
-        .take(12)
-        .toList();
-    yuqiaoDebugLog(
-      '[Qwen recommendNextOptions] returned=${options.length} '
-      'options=${options.join('/')}',
-    );
-    return options;
-  }
-
-  Future<List<StuckCandidate>> recommendGuidedOptions(
-    CandidateRecommendationRequest request, {
-    QwenCancellationToken? cancellationToken,
-  }) async {
-    _ensureConfigured();
-    yuqiaoDebugLog(
-      '[Qwen guided stuck] slot=${request.slotKey} '
-      'diversify=${request.diversificationLevel} '
-      'excluded=${request.excludeOptions.length}',
-    );
-    final expectedSlot = StuckExpressionSlot.values.firstWhere(
-      (slot) => slot.key == request.slotKey,
-      orElse: () => StuckExpressionSlot.detail,
-    );
-    final confirmedContext = request.selectedKeywords
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty)
-        .join(' / ');
-    final hasUserContext = confirmedContext.isNotEmpty;
-    final response = await _post({
-      'model': _recommendModel,
-      'temperature': request.diversificationLevel > 0 ? 0.48 : 0.28,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文失语症辅助沟通 App 的独立补词模块。'
-              '这里没有实时对话上下文，只能使用用户当前选择的表达任务、已确认槽位和记得的文字片段。'
-              '用户明确提供的信息是最高优先级：只要已有片段或已确认槽位，每个候选都必须能自然接在这些信息之后，不能重新猜一个无关话题。'
-              '你只负责生成指定 slot 的候选，不能返回其他类型。'
-              '候选可以是词、短语或很短的句子，每项不超过 18 个汉字。'
-              'semanticGroup 表示候选代表的不同语义方向；前 ${request.displayCount} 项必须尽量属于不同方向，不能只是同义改写。'
-              '地点、时间、历史词和个人词只能在符合当前 slot 且与用户已选内容连贯时使用。'
-              '只返回 JSON 对象：'
-              '{"candidates":[{"text":"候选","slot":"指定slot","semanticGroup":"语义方向"}]}。',
-        },
-        {
-          'role': 'user',
-          'content': '表达任务：${request.intent}\n'
-              '当前时间：${request.timeText.isEmpty ? '未知' : request.timeText}\n'
-              '当前地点：${request.locationText.isEmpty ? '未知' : request.locationText}\n'
-              '当前问题：${request.stepTitle}\n'
-              '当前槽位：${request.slotKey}（${request.slotLabel}）\n'
-              '用户明确提供的信息（最高优先级）：${hasUserContext ? confirmedContext : '暂无，只有表达任务'}\n'
-              '${hasUserContext ? '强约束：逐项检查候选是否与上述全部信息连贯；不连贯的候选不要输出。\n' : '当前信息不足，可以覆盖几个常见但不同的日常方向。\n'}'
-              '${hasUserContext ? '' : '无上下文时的本地参考：${request.fallbackOptions.join(' / ')}\n'}'
-              '个人词仅在与用户信息直接相关时使用：${request.personalWords.join(' / ')}\n'
-              '${request.excludeOptions.isEmpty ? '' : '禁止重复：${request.excludeOptions.join(' / ')}\n'}'
-              '${request.diversificationLevel > 0 ? '这是用户点击“换一组”后的第 ${request.diversificationLevel + 1} 组，必须重新基于已选内容生成，不要复用上一组语义方向，也不要只换同义词。\n' : ''}'
-              '返回 ${math.max(8, request.displayCount + 4)} 到 12 个候选，严格保持 slot 为 ${request.slotKey}。',
-        },
-      ],
-    }, cancellationToken: cancellationToken);
-    final decoded = jsonDecode(_stripCodeFence(_messageContent(response)));
-    if (decoded is! Map<String, dynamic> || decoded['candidates'] is! List) {
-      throw const QwenException('补词候选格式错误，应为 JSON 对象。');
-    }
-    final excluded = request.excludeOptions
-        .map(LocationRecommendationController.normalizeText)
-        .toSet();
-    final seen = <String>{};
-    final candidates = <StuckCandidate>[];
-    final rawCandidates = decoded['candidates'] as List;
-    var rejected = 0;
-    for (final raw in rawCandidates) {
-      if (raw is! Map) continue;
-      final item = Map<String, dynamic>.from(raw);
-      final text = (item['text']?.toString() ?? '')
-          .trim()
-          .replaceAll(RegExp(r'[。！？!?]+$'), '')
-          .trim();
-      final slot = item['slot']?.toString().trim() ?? '';
-      final semanticGroup = item['semanticGroup']?.toString().trim() ?? '';
-      final normalized = LocationRecommendationController.normalizeText(text);
-      final slotMatches = slot.isEmpty ||
-          slot == request.slotKey ||
-          slot == request.slotLabel ||
-          slot == expectedSlot.label;
-      if (!slotMatches ||
-          text.isEmpty ||
-          text.length > 18 ||
-          semanticGroup.isEmpty ||
-          excluded.contains(normalized) ||
-          !seen.add(normalized)) {
-        rejected++;
-        continue;
-      }
-      candidates.add(StuckCandidate(
-        text: text,
-        semanticGroup: semanticGroup,
-        slot: expectedSlot,
-        isModelGenerated: true,
-      ));
-      if (candidates.length == 12) break;
-    }
-    yuqiaoDebugLog(
-      '[Qwen guided stuck] raw=${rawCandidates.length} '
-      'accepted=${candidates.length} rejected=$rejected '
-      'options=${candidates.map((item) => '${item.semanticGroup}:${item.text}').join('/')}',
-    );
-    return candidates;
-  }
-
-  Future<List<String>> recommendConversationOptions(
-    ConversationContextRequest request, {
-    QwenCancellationToken? cancellationToken,
-  }) async {
-    _ensureConfigured();
-    yuqiaoDebugLog(
-        '[Qwen conversation] transcript=${request.transcript.length} chars');
-    final response = await _post({
-      'model': _recommendModel,
-      'temperature': 0.3,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文失语症辅助沟通 App 的对话补词模块。'
-              '必须优先衔接指定用户最近尚未完成或刚完成的表达，而不是根据地点猜测通用需求。'
-              '返回 4 个沟通功能不同的候选，可以是词、短语或完整短句，正文每项 2 到 14 个汉字。'
-              '四项必须分别使用“继续、补充、询问、等待”作为类型前缀，格式为“类型：正文”；'
-              '不能出现两个同义改写。可以提出上下文之外的新人物、地点、数字或症状，'
-              '但只能写成询问、可能性或建议，不能当作用户已经确认的事实。'
-              '上下文不足时宁可返回“请等我一下”等修复性表达，也不要猜测“我不舒服”。'
-              '只返回 JSON 字符串数组，例如["继续：我想喝水","补充：要温水","询问：有温水吗","等待：请等我一下"]。',
-        },
-        {
-          'role': 'user',
-          'content': '当前时间：${request.timeText}\n'
-              '当前位置：${request.locationText}\n'
-              '用户对应说话者：${request.userSpeakerLabel}\n'
-              '当前转写片段：${request.currentPartial}\n'
-              '当前对话上下文：\n${request.transcript}\n\n'
-              '近期表达：${request.recentExpressions.join(' / ')}\n'
-              '个人常用语：${request.personalWords.join(' / ')}\n'
-              '${request.preferredTypes.isEmpty ? '' : '用户过去更常选择的表达类型：${request.preferredTypes.join(' / ')}\n'}'
-              '${request.rejectedCandidates.isEmpty ? '' : '本轮及相似语境中不合适的候选：${request.rejectedCandidates.join(' / ')}\n'}'
-              '请紧扣该用户最后一句，返回四个意图不同的候选，只返回 JSON 数组。',
-        },
-      ],
-    }, cancellationToken: cancellationToken);
-    const allowedTypes = {'继续', '补充', '询问', '等待'};
-    final seenTypes = <String>{};
-    final seenContent = <String>{};
-    final rejected = request.rejectedCandidates
-        .map(LocationRecommendationController.normalizeText)
-        .toSet();
-    final options = <String>[];
-    for (final value in _parseStringList(_messageContent(response))) {
-      final option = _normalizeOption(value);
-      final separator = option.indexOf(RegExp(r'[：:]'));
-      if (separator <= 0) continue;
-      final type = option.substring(0, separator).trim();
-      final content = option.substring(separator + 1).trim();
-      final normalizedContent =
-          LocationRecommendationController.normalizeText(content);
-      if (!allowedTypes.contains(type) ||
-          content.isEmpty ||
-          content.length > 14 ||
-          rejected.contains(
-            LocationRecommendationController.normalizeText(option),
-          ) ||
-          rejected.contains(normalizedContent) ||
-          !seenTypes.add(type) ||
-          !seenContent.add(normalizedContent)) {
-        continue;
-      }
-      options.add('$type：$content');
-    }
-    yuqiaoDebugLog('[Qwen conversation] returned=${options.join('/')}');
-    return options;
-  }
-
-  Future<String?> suggestStuckAssistSentence(
-    ConversationContextRequest request, {
-    QwenCancellationToken? cancellationToken,
-  }) async {
-    _ensureConfigured();
-    final response = await _post({
-      'model': _recommendModel,
-      'temperature': 0.1,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文失语症辅助沟通 App 的卡顿辅助模块。'
-              '用户可能在表达中途卡住，请根据已经明确说出的内容整理一条可直接播报的简短句子。'
-              '不能添加对话中没有出现的对象、意图、地点、症状或事实，不能替用户做决定。'
-              '如果上下文不足以恢复具体意图，使用安全的沟通句，例如“请等一下，我还在想”。'
-              '句子不超过 24 个汉字，只返回包含一个字符串的 JSON 数组。',
-        },
-        {
-          'role': 'user',
-          'content': '当前时间：${request.timeText}\n'
-              '当前地点类型：${request.locationText}\n'
-              '疑似卡顿片段：${request.currentPartial}\n'
-              '最近对话：\n${request.transcript}\n\n'
-              '近期表达：${request.recentExpressions.join(' / ')}\n'
-              '个人词汇：${request.personalWords.join(' / ')}\n'
-              '请整理一条需要用户确认后才能播报的候选句。',
-        },
-      ],
-    }, cancellationToken: cancellationToken);
-    final options = _parseStringList(_messageContent(response))
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty && item.length <= 30)
-        .toList();
-    return options.isEmpty ? null : options.first;
-  }
-
-  Future<_ConversationUnderstanding> _explainConversationUtterance({
-    required String original,
-    required String speakerLabel,
-    required List<String> surroundingContext,
-    required List<String> personalWords,
-    QwenCancellationToken? cancellationToken,
-  }) async {
-    _ensureConfigured();
-    final source = original.trim();
-    if (source.isEmpty) throw const QwenException('转录内容为空。');
-    final response = await _post({
-      'model': _textModel,
-      'temperature': 0.0,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文失语症用户的语句理解辅助模块。'
-              '任务是把用户主动选中的一句话拆成少量、清楚的信息，再用更简单的中文解释。'
-              '必须保留原句中的人物、动作、对象、时间、地点、数字、否定和先后顺序。'
-              '不得补充原句没有的事实，不得把相邻对话中的内容写进原句解释。'
-              '相邻对话只能用来理解代词；无法确定代词时写入 uncertainties，不要猜。'
-              '每个 parts 项必须给出 evidence，而evidence 必须是原句中连续出现的原文。'
-              'label 优先使用“人物、时间、地点、先做、然后、动作、对象、要求、重点”。'
-              '只返回 JSON 对象：'
-              '{"original":"逐字原句","parts":[{"label":"时间","text":"简短解释","evidence":"原句片段"}],'
-              '"simpleMeaning":"一句简单解释","importantNote":"最需注意的一点","uncertainties":[]}。',
-        },
-        {
-          'role': 'user',
-          'content': '选中说话者：$speakerLabel\n'
-              '待解释原句：$source\n'
-              '相邻对话（仅用于代词理解）：\n${surroundingContext.join('\n')}\n'
-              '已确认个人词汇（仅用于识别名称）：${personalWords.join(' / ')}\n'
-              '请将原句拆成 1 到 5 个信息点。',
-        },
-      ],
-    }, cancellationToken: cancellationToken);
-    final decoded = jsonDecode(_stripCodeFence(_messageContent(response)));
-    if (decoded is! Map<String, dynamic> ||
-        decoded['original']?.toString().trim() != source ||
-        decoded['parts'] is! List) {
-      throw const QwenException('理解结果格式不正确。');
-    }
-
-    final parts = <_UnderstandingPart>[];
-    for (final value in decoded['parts'] as List) {
-      if (value is! Map) continue;
-      final item = Map<String, dynamic>.from(value);
-      final label = item['label']?.toString().trim() ?? '';
-      final text = item['text']?.toString().trim() ?? '';
-      final evidence = item['evidence']?.toString().trim() ?? '';
-      if (label.isEmpty ||
-          label.length > 8 ||
-          text.isEmpty ||
-          text.length > 40 ||
-          evidence.isEmpty ||
-          !source.contains(evidence)) {
-        continue;
-      }
-      parts.add(
-        _UnderstandingPart(label: label, text: text, evidence: evidence),
-      );
-      if (parts.length == 5) break;
-    }
-    final simpleMeaning = decoded['simpleMeaning']?.toString().trim() ?? '';
-    final importantNote = decoded['importantNote']?.toString().trim() ?? '';
-    final uncertainties = decoded['uncertainties'] is List
-        ? (decoded['uncertainties'] as List)
-            .whereType<String>()
-            .map((item) => item.trim())
-            .where((item) => item.isNotEmpty)
-            .take(3)
-            .toList(growable: false)
-        : const <String>[];
-    if (parts.isEmpty ||
-        simpleMeaning.isEmpty ||
-        simpleMeaning.length > 100 ||
-        importantNote.length > 60 ||
-        !_understandingPreservesCriticalMeaning(source, simpleMeaning)) {
-      throw const QwenException('模型未能给出可靠的简化解释。');
-    }
-    return _ConversationUnderstanding(
-      original: source,
-      parts: parts,
-      simpleMeaning: simpleMeaning,
-      importantNote: importantNote,
-      uncertainties: uncertainties,
-    );
-  }
-
-  bool _understandingPreservesCriticalMeaning(
-    String original,
-    String simpleMeaning,
-  ) {
-    final sourceDigits = RegExp(r'\d+(?:[.:]\d+)?')
-        .allMatches(original)
-        .map((match) => match.group(0))
-        .whereType<String>()
-        .toSet();
-    final resultDigits = RegExp(r'\d+(?:[.:]\d+)?')
-        .allMatches(simpleMeaning)
-        .map((match) => match.group(0))
-        .whereType<String>()
-        .toSet();
-    if (!sourceDigits.containsAll(resultDigits)) return false;
-    final hasSourceNegation = RegExp(r'不|没|别|禁止|无需|未').hasMatch(original);
-    final hasResultNegation = RegExp(r'不|没|别|禁止|无需|未').hasMatch(simpleMeaning);
-    return hasSourceNegation == hasResultNegation;
-  }
-
-  Future<_SpeechRepairSuggestion?> _analyzeSpeechRepair(
-    ConversationContextRequest request, {
-    QwenCancellationToken? cancellationToken,
-  }) async {
-    _ensureConfigured();
-    final response = await _post({
-      'model': _recommendModel,
-      'temperature': 0.0,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文失语症辅助沟通 App 的表达核对模块。'
-              '你不是自动纠错器，只有在用户最后一句与已有对话存在强烈、可解释的语义冲突时才建议核对。'
-              '不得因为句子稀有、不符合常识、包含新人名、地点、数字或症状就判定有错。'
-              '地点、时间、个人词只是弱参考，不能作为唯一依据。'
-              '不确定时必须返回 needsConfirmation=false。'
-              '需要核对时，original 必须逐字保留用户原话；'
-              'candidates 必须包含原话，再给出 1 到 3 个语义不同的可能表达，不能只换同义词。'
-              '不能替用户确定意图。'
-              '只返回 JSON：'
-              '{"needsConfirmation":true,"original":"用户原话","reason":"简短中性原因","candidates":["用户原话","可能表达"]}。',
-        },
-        {
-          'role': 'user',
-          'content': '当前时间：${request.timeText}\n'
-              '当前地点类型：${request.locationText}\n'
-              '用户对应说话者：${request.userSpeakerLabel}\n'
-              '待核对原话：${request.currentPartial}\n'
-              '最近对话：\n${request.transcript}\n\n'
-              '近期表达：${request.recentExpressions.join(' / ')}\n'
-              '个人词汇：${request.personalWords.join(' / ')}\n'
-              '请优先避免打扰；只有证据充分时才请用户核对。',
-        },
-      ],
-    }, cancellationToken: cancellationToken);
-    final decoded = jsonDecode(_stripCodeFence(_messageContent(response)));
-    if (decoded is! Map<String, dynamic> ||
-        decoded['needsConfirmation'] != true) {
-      return null;
-    }
-    final original = request.currentPartial.trim();
-    final returnedOriginal = decoded['original']?.toString().trim() ?? '';
-    if (original.isEmpty || returnedOriginal != original) return null;
-    final values = decoded['candidates'];
-    if (values is! List) return null;
-    final candidates = <String>[original];
-    final seen = <String>{
-      LocationRecommendationController.normalizeText(original),
-    };
-    for (final value in values) {
-      final candidate = value?.toString().trim() ?? '';
-      final normalized =
-          LocationRecommendationController.normalizeText(candidate);
-      if (candidate.isEmpty ||
-          candidate.length > 48 ||
-          normalized.isEmpty ||
-          !seen.add(normalized)) {
-        continue;
-      }
-      candidates.add(candidate);
-      if (candidates.length == 4) break;
-    }
-    if (candidates.length < 2) return null;
-    final reason = decoded['reason']?.toString().trim() ?? '';
-    return _SpeechRepairSuggestion(
-      original: original,
-      candidates: candidates,
-      reason: reason.length <= 40 ? reason : '这句话可能与前文不一致，请你来确认。',
-    );
-  }
-
-  Future<List<ConversationTermCandidate>> extractConversationTerms(
-    String transcript, {
-    QwenCancellationToken? cancellationToken,
-  }) async {
-    _ensureConfigured();
-    final text = transcript.trim();
-    if (text.isEmpty) return const [];
-    final response = await _post({
-      'model': _recommendModel,
-      'temperature': 0.0,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文对话中的专有词汇提取模块。'
-              '只提取明确出现的人名、具体地名、机构名或高度个性化的专有称呼。'
-              '不要提取“妈妈、朋友、医院、公园、今天、吃饭”等普通词。'
-              'text 必须逐字来自原句，不能纠错、补全或猜测。'
-              'type 只能是 person、place、organization、custom。'
-              'confidence 是 0 到 1。没有明确专有词时返回空数组。'
-              '只返回 JSON：{"terms":[{"text":"王阿姨","type":"person","confidence":0.95}]}。',
-        },
-        {
-          'role': 'user',
-          'content': '原句：$text',
-        },
-      ],
-    }, cancellationToken: cancellationToken);
-    final cleaned = _stripCodeFence(_messageContent(response));
-    final decoded = jsonDecode(cleaned);
-    if (decoded is! Map<String, dynamic> || decoded['terms'] is! List) {
-      return const [];
-    }
-    final seen = <String>{};
-    final terms = <ConversationTermCandidate>[];
-    for (final value in (decoded['terms'] as List)) {
-      if (value is! Map) continue;
-      final item = Map<String, dynamic>.from(value);
-      final termText = item['text']?.toString().trim() ?? '';
-      final normalized = normalizeConversationTerm(termText);
-      final confidence = (item['confidence'] as num?)?.toDouble() ?? 0.0;
-      if (termText.length < 2 ||
-          termText.length > 20 ||
-          !text.contains(termText) ||
-          confidence < 0.65 ||
-          !seen.add(normalized)) {
-        continue;
-      }
-      terms.add(ConversationTermCandidate(
-        text: termText,
-        type: normalizeConversationTermType(item['type']?.toString()),
-        confidence: confidence,
-      ));
-      if (terms.length == 6) break;
-    }
-    return terms;
-  }
-
-  Future<ObjectRecognition> recognizeObject(
-    Uint8List imageBytes, {
-    List<PersonalObject> personalObjects = const [],
-    String locationType = '未知地点',
-    String timeContext = '未知时间',
-  }) async {
-    _ensureConfigured();
-    final encoded = base64Encode(imageBytes);
-    final imageContent = <Map<String, dynamic>>[
-      {
-        'type': 'text',
-        'text': '请识别第一张图片中的所有物品并给出位置坐标。'
-            '当前地点类型：$locationType。当前本地时间：$timeContext。'
-            '请优先给出在这个场景和时间下自然、可立即使用的表达。',
-      },
-      {
-        'type': 'image_url',
-        'image_url': {'url': 'data:image/jpeg;base64,$encoded'},
-      },
-    ];
-    final response = await _post({
-      'model': _visionModel,
-      'temperature': 0.1,
-      'messages': [
-        {
-          'role': 'system',
-          'content': '你是中文 AAC 辅助沟通 App 的拍照识别模块。'
-              '直接识别图片中所有可见的物品，不要求用户确认，直接告诉用户图片中有什么。'
-              '每个物品给出 3 个意图明显不同的表达选项（适合失语症患者使用）。'
-              '每个选项必须包含 type 和 phrase：type 是 2 到 4 个汉字的表达类型，'
-              '例如“购买、饮用、使用、寻找、询问、求助”；phrase 是可以直接播报的简短表达。'
-              '同一物品的三个 type 不能重复或语义近似，不能只是对同一句话换一种说法。'
-              '表达选项需要结合用户当前的地点类型和时间，但不能据此虚构用户意图。'
-              'category 只能从“饮食、生活用品、衣物、电子设备、钥匙证件、康复用品、其他”中选择。'
-              '同时给出每个物品在图片中的大致位置（归一化坐标，范围 0-1000）。'
-              'bbox 必须紧贴物品可见轮廓，不要把大片背景、桌面或相邻物品包含进去；'
-              '坐标必须相对于上传图片完整画面，而不是模型自行裁剪或缩放后的局部画面。'
-              '这是客观识别阶段，不提供个人物品参考，personalObjectId 必须始终返回空字符串。'
-              '输出必须是 JSON 对象，格式：'
-              '{"candidates":[{"objectName":"水杯","category":"饮食","visualDescription":"蓝色杯身","personalObjectId":"","bbox":[100,200,500,600],"expressionOptions":[{"type":"购买","phrase":"我想买一个水杯"},{"type":"饮用","phrase":"我想喝水"},{"type":"使用","phrase":"帮我打开杯盖"}]}]}。'
-              'bbox 为 [x1, y1, x2, y2]，分别表示左上角和右下角的归一化坐标（0-1000）。',
-        },
-        {
-          'role': 'user',
-          'content': imageContent,
-        },
-      ],
-    });
-    final parsedRecognition = _parseRecognition(_messageContent(response));
-    final genericRecognition = ObjectRecognition(
-      candidates: parsedRecognition.candidates
-          .map((candidate) => candidate.copyWith(personalObjectId: ''))
-          .toList(growable: false),
-    );
-    if (personalObjects.isEmpty || genericRecognition.candidates.isEmpty) {
-      return genericRecognition;
-    }
-    return _verifyPersonalObjectMatches(
-      imageBytes,
-      genericRecognition,
-      personalObjects,
-    );
-  }
-
-  Future<ObjectRecognition> refineObjectBoundingBoxes(
-    Uint8List imageBytes,
-    ObjectRecognition recognition,
-  ) async {
-    if (recognition.candidates.isEmpty) return recognition;
-    final targets = [
-      for (var index = 0; index < recognition.candidates.length; index++)
-        {
-          'candidateIndex': index,
-          'objectName': recognition.candidates[index].objectName,
-          'roughBbox': recognition.candidates[index].bbox,
-        },
-    ];
-    try {
-      final response = await _post({
-        'model': _visionModel,
-        'temperature': 0.0,
-        'messages': [
-          {
-            'role': 'system',
-            'content': '你是视觉定位模块，只精修已识别物品的位置，不重新命名物品，不生成表达。'
-                '对每个目标寻找其在图片中实际可见的完整轮廓，bbox 必须紧贴物品，不包含桌面、墙面或相邻物品。'
-                '坐标统一使用相对于整张上传图片的 0-1000 归一化坐标，不能使用裁剪图、百分比或像素坐标。'
-                '如果目标在图片中不可见或无法可靠定位，就省略该目标，不能猜测。'
-                '只返回 JSON：{"boxes":[{"candidateIndex":0,"bbox":[x1,y1,x2,y2],"confidence":0.95}]}。',
-          },
-          {
-            'role': 'user',
-            'content': [
-              {
-                'type': 'text',
-                'text': '需要精修的目标：${jsonEncode(targets)}',
-              },
-              {
-                'type': 'image_url',
-                'image_url': {
-                  'url': 'data:image/jpeg;base64,${base64Encode(imageBytes)}',
-                },
-              },
-            ],
-          },
-        ],
-      });
-      final decoded = jsonDecode(_stripCodeFence(_messageContent(response)));
-      if (decoded is! Map<String, dynamic> || decoded['boxes'] is! List) {
-        return recognition;
-      }
-      final refined = <int, List<double>>{};
-      for (final raw in decoded['boxes'] as List) {
-        if (raw is! Map) continue;
-        final box = Map<String, dynamic>.from(raw);
-        final index = (box['candidateIndex'] as num?)?.toInt() ?? -1;
-        final confidence = (box['confidence'] as num?)?.toDouble() ?? 0;
-        final bbox = normalizeModelBoundingBox(box['bbox']);
-        if (index < 0 ||
-            index >= recognition.candidates.length ||
-            confidence < 0.72 ||
-            bbox == null) {
-          continue;
-        }
-        final area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]);
-        if (area < 400 || area > 950000) continue;
-        refined[index] = bbox;
-        yuqiaoDebugLog(
-          '[Camera bbox refine] index=$index confidence=$confidence bbox=$bbox',
-        );
-      }
-      if (refined.isEmpty) return recognition;
-      return ObjectRecognition(
-        candidates: [
-          for (var index = 0; index < recognition.candidates.length; index++)
-            refined[index] == null
-                ? recognition.candidates[index]
-                : recognition.candidates[index].copyWith(
-                    bbox: refined[index],
-                  ),
-        ],
-      );
-    } catch (error) {
-      yuqiaoDebugLog('[Camera bbox refine] skipped: $error');
-      return recognition;
-    }
-  }
-
-  Future<ObjectRecognition> _verifyPersonalObjectMatches(
-    Uint8List imageBytes,
-    ObjectRecognition recognition,
-    List<PersonalObject> personalObjects,
-  ) async {
-    final references = <PersonalObject>[];
-    for (final object in personalObjects) {
-      if (references.length >= 3) break;
-      if (object.referenceImagePath.isEmpty ||
-          !recognition.candidates.any(
-            (candidate) => PersonalObjectMatchPolicy.kindsCompatible(
-              candidate.objectName,
-              object.displayName,
-            ),
-          )) {
-        continue;
-      }
-      if (await File(object.referenceImagePath).exists()) {
-        references.add(object);
-      }
-    }
-    if (references.isEmpty) return recognition;
-
-    final candidateSummary = [
-      for (var index = 0; index < recognition.candidates.length; index++)
-        {
-          'candidateIndex': index,
-          'objectName': recognition.candidates[index].objectName,
-          'category': recognition.candidates[index].category,
-          'visualDescription': recognition.candidates[index].visualDescription,
-          'bbox': recognition.candidates[index].bbox,
-        },
-    ];
-    final content = <Map<String, dynamic>>[
-      {
-        'type': 'text',
-        'text': '第一张图片是本次拍摄图。第一阶段客观识别结果：'
-            '${jsonEncode(candidateSummary)}。接下来是可能相关的个人物品参考图。',
-      },
-      {
-        'type': 'image_url',
-        'image_url': {
-          'url': 'data:image/jpeg;base64,${base64Encode(imageBytes)}',
-        },
-      },
-    ];
-    for (final object in references) {
-      final bytes = await File(object.referenceImagePath).readAsBytes();
-      content
-        ..add({
-          'type': 'text',
-          'text': '参考物品：ID=${object.id}；名称=${object.displayName}；'
-              '类型=${object.category}；用户记录的独特外观=${object.visualDescription}。',
-        })
-        ..add({
-          'type': 'image_url',
-          'image_url': {
-            'url': 'data:image/jpeg;base64,${base64Encode(bytes)}',
-          },
-        });
-    }
-
-    try {
-      final response = await _post({
-        'model': _visionModel,
-        'temperature': 0.0,
-        'messages': [
-          {
-            'role': 'system',
-            'content': '你是个人物品同一实体核验器，不负责重新识别物品。'
-                '只有能确认本次拍摄物体与参考图是同一件物理实体时才能匹配；同品类、同款、同颜色、同品牌都不足以证明是同一件。'
-                '至少需要两条相互独立的外观证据，其中至少一条必须是贴纸、独特图案、划痕、磨损、缺口、挂件、标签、污渍、凹痕或用户记录的独特组合特征。'
-                '角度、光照、背景不同不能当作匹配证据。有任何明显冲突或物体在本次图片中看不清时必须拒绝。'
-                '不要因为系统提供了参考图就倾向匹配。宁可漏认，也不能误认。'
-                '只返回 JSON：{"matches":[{"candidateIndex":0,"personalObjectId":"ID","samePhysicalObject":true,"confidence":0.98,"matchingEvidence":["证据1","证据2"],"conflictingEvidence":[]}]}。'
-                '没有达到标准时返回 {"matches":[]}。',
-          },
-          {'role': 'user', 'content': content},
-        ],
-      });
-      final decoded = jsonDecode(_stripCodeFence(_messageContent(response)));
-      if (decoded is! Map<String, dynamic> || decoded['matches'] is! List) {
-        return recognition;
-      }
-      final referenceById = {for (final item in references) item.id: item};
-      final accepted = <int, PersonalObject>{};
-      for (final raw in decoded['matches'] as List) {
-        if (raw is! Map) continue;
-        final match = Map<String, dynamic>.from(raw);
-        final index = (match['candidateIndex'] as num?)?.toInt() ?? -1;
-        final id = match['personalObjectId']?.toString() ?? '';
-        final confidence = (match['confidence'] as num?)?.toDouble() ?? 0;
-        final evidence = (match['matchingEvidence'] as List? ?? const [])
-            .whereType<String>()
-            .map((item) => item.trim())
-            .where((item) => item.isNotEmpty)
-            .toList();
-        final conflicts = (match['conflictingEvidence'] as List? ?? const [])
-            .whereType<String>()
-            .map((item) => item.trim())
-            .where((item) => item.isNotEmpty)
-            .toList();
-        final object = referenceById[id];
-        final validIndex = index >= 0 && index < recognition.candidates.length;
-        final acceptedMatch = object != null &&
-            validIndex &&
-            PersonalObjectMatchPolicy.kindsCompatible(
-              recognition.candidates[index].objectName,
-              object.displayName,
-            ) &&
-            PersonalObjectMatchPolicy.acceptsMatch(
-              samePhysicalObject: match['samePhysicalObject'] == true,
-              confidence: confidence,
-              matchingEvidence: evidence,
-              conflictingEvidence: conflicts,
-            );
-        yuqiaoDebugLog(
-          '[Personal object match] candidate=$index id=$id '
-          'confidence=$confidence evidence=${evidence.length} '
-          'conflicts=${conflicts.length} accepted=$acceptedMatch',
-        );
-        if (acceptedMatch) accepted[index] = object;
-      }
-      return ObjectRecognition(
-        candidates: [
-          for (var index = 0; index < recognition.candidates.length; index++)
-            _applyPersonalObjectMatch(
-              recognition.candidates[index],
-              accepted[index],
-            ),
-        ],
-      );
-    } catch (error) {
-      yuqiaoDebugLog('[Personal object match] verification skipped: $error');
-      return recognition;
-    }
-  }
-
-  ObjectCandidate _applyPersonalObjectMatch(
-    ObjectCandidate candidate,
-    PersonalObject? object,
-  ) {
-    if (object == null) return candidate.copyWith(personalObjectId: '');
-    final options = <ObjectExpressionOption>[];
-    final seen = <String>{};
-    for (final phrase in [
-      ...object.commonExpressions,
-      ...candidate.expressions,
-    ]) {
-      final clean = phrase.trim();
-      final normalized = LocationRecommendationController.normalizeText(clean);
-      if (clean.isEmpty || !seen.add(normalized)) continue;
-      options.add(ObjectExpressionOption(
-        type: _inferExpressionType(clean),
-        phrase: clean,
-      ));
-      if (options.length == 3) break;
-    }
-    return candidate.copyWith(
-      objectName: object.displayName,
-      personalObjectId: object.id,
-      expressions: options.map((item) => item.phrase).toList(),
-      expressionOptions: options,
-    );
-  }
-
-  Future<Map<String, dynamic>> _post(
-    Map<String, dynamic> body, {
-    QwenCancellationToken? cancellationToken,
-  }) async {
-    final uri = Uri.parse(_baseUrl);
-    yuqiaoDebugLog('[Qwen API] POST $uri model=${body['model']}');
-    const retryableStatusCodes = {429, 500, 502, 503, 504};
-    Object? lastError;
-    for (var attempt = 1; attempt <= 2; attempt++) {
-      cancellationToken?.throwIfCancelled();
-      try {
-        final request = http.AbortableRequest(
-          'POST',
-          uri,
-          abortTrigger: cancellationToken?.whenCancelled,
-        )
-          ..headers.addAll({
-            'Authorization': 'Bearer $_apiKey',
-            'Content-Type': 'application/json',
-          })
-          ..body = jsonEncode(body);
-        final streamed =
-            await _client.send(request).timeout(const Duration(seconds: 35));
-        final result = await http.Response.fromStream(streamed);
-        cancellationToken?.throwIfCancelled();
-        if (result.statusCode >= 200 && result.statusCode < 300) {
-          yuqiaoDebugLog('[Qwen API] success ${result.statusCode}');
-          final decoded = jsonDecode(utf8.decode(result.bodyBytes));
-          if (decoded is! Map<String, dynamic>) {
-            throw const QwenException('Qwen API 返回格式不是 JSON 对象。');
-          }
-          return decoded;
-        }
-        yuqiaoDebugLog('[Qwen API] error ${result.statusCode}: ${result.body}');
-        if (!retryableStatusCodes.contains(result.statusCode) || attempt == 2) {
-          throw QwenException(
-            'Qwen API 请求失败：${result.statusCode} ${result.body}',
-          );
-        }
-        lastError = QwenException('Qwen API 暂时不可用：${result.statusCode}');
-      } on QwenCancelledException {
-        rethrow;
-      } on TimeoutException catch (error) {
-        lastError = error;
-        if (attempt == 2) rethrow;
-      } on SocketException catch (error) {
-        lastError = error;
-        if (attempt == 2) rethrow;
-      } on http.ClientException catch (error) {
-        if (cancellationToken?.isCancelled == true) {
-          throw const QwenCancelledException();
-        }
-        lastError = error;
-        if (attempt == 2) rethrow;
-      }
-      cancellationToken?.throwIfCancelled();
-      await Future<void>.delayed(Duration(milliseconds: 650 * attempt));
-    }
-    throw QwenException('Qwen API 请求失败：$lastError');
-  }
-
-  String _messageContent(Map<String, dynamic> response) {
-    final choices = response['choices'];
-    if (choices is! List || choices.isEmpty) {
-      throw const QwenException('Qwen API 未返回候选结果。');
-    }
-    final choice = choices.first;
-    if (choice is! Map<String, dynamic>) {
-      throw const QwenException('Qwen API 候选格式异常。');
-    }
-    final message = choice['message'];
-    if (message is! Map<String, dynamic>) {
-      throw const QwenException('Qwen API 消息格式异常。');
-    }
-    final content = message['content'];
-    if (content is String && content.trim().isNotEmpty) {
-      return content.trim();
-    }
-    throw const QwenException('Qwen API 返回内容为空。');
-  }
-
-  List<String> _parseStringList(String content) {
-    final cleaned = _stripCodeFence(content);
-    final decoded = jsonDecode(cleaned);
-    if (decoded is! List) {
-      throw const QwenException('候选句返回格式错误，应为 JSON 数组。');
-    }
-    final sentences = decoded
-        .whereType<String>()
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty)
-        .toList();
-    if (sentences.isEmpty) {
-      throw const QwenException('未生成可用候选句。');
-    }
-    return sentences;
-  }
-
-  ObjectRecognition _parseRecognition(String content) {
-    final cleaned = _stripCodeFence(content);
-    final decoded = jsonDecode(cleaned);
-    if (decoded is! Map<String, dynamic>) {
-      throw const QwenException('识别结果返回格式错误，应为 JSON 对象。');
-    }
-    final candidates = decoded['candidates'];
-    if (candidates is List) {
-      final parsedCandidates = candidates
-          .whereType<Map<String, dynamic>>()
-          .map(_parseObjectCandidate)
-          .where((candidate) => candidate.objectName.isNotEmpty)
-          .take(4)
-          .toList();
-      if (parsedCandidates.isNotEmpty) {
-        return ObjectRecognition(candidates: parsedCandidates);
-      }
-    }
-
-    // Backward compatible fallback for occasional single-result model output.
-    final objectName = decoded['objectName'];
-    final expressions = decoded['expressions'];
-    if (objectName is! String ||
-        objectName.trim().isEmpty ||
-        expressions is! List) {
-      throw const QwenException('识别结果缺少物品名称或表达候选。');
-    }
-    final expressionList = expressions
-        .whereType<String>()
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty)
-        .take(4)
-        .toList();
-    if (expressionList.isEmpty) {
-      throw const QwenException('识别结果没有可用表达候选。');
-    }
-    return ObjectRecognition(
-      candidates: [
-        ObjectCandidate(
-          objectName: objectName.trim(),
-          confidence: '高',
-          expressions: expressionList,
-          expressionOptions: expressionList
-              .map(
-                (phrase) => ObjectExpressionOption(
-                  type: _inferExpressionType(phrase),
-                  phrase: phrase,
-                ),
-              )
-              .toList(),
-        ),
-      ],
-    );
-  }
-
-  ObjectCandidate _parseObjectCandidate(Map<String, dynamic> json) {
-    final objectName = json['objectName'];
-    final rawExpressionOptions = json['expressionOptions'];
-    final expressionOptions = _parseExpressionOptions(rawExpressionOptions);
-    final expressions = json['expressions'];
-    final legacyExpressionList = expressions is List
-        ? expressions
-            .whereType<String>()
-            .map((item) => item.trim())
-            .where((item) => item.isNotEmpty)
-            .take(3)
-            .toList()
-        : <String>[];
-    final effectiveOptions = expressionOptions.isNotEmpty
-        ? expressionOptions
-        : legacyExpressionList
-            .map(
-              (phrase) => ObjectExpressionOption(
-                type: _inferExpressionType(phrase),
-                phrase: phrase,
-              ),
-            )
-            .toList();
-    final expressionList = effectiveOptions
-        .map((item) => item.phrase)
-        .where((item) => item.isNotEmpty)
-        .toList();
-    final rawBbox = json['bbox'];
-    final bbox = normalizeModelBoundingBox(rawBbox);
-    yuqiaoDebugLog(
-        '[Camera bbox] object=${objectName is String ? objectName : ''} '
-        'raw=$rawBbox normalized=$bbox');
-    return ObjectCandidate(
-      objectName: objectName is String ? objectName.trim() : '',
-      confidence:
-          json['confidence'] is String ? json['confidence'] as String : '',
-      category: json['category'] is String ? json['category'] as String : '',
-      visualDescription: json['visualDescription'] is String
-          ? json['visualDescription'] as String
-          : '',
-      personalObjectId: json['personalObjectId'] is String
-          ? json['personalObjectId'] as String
-          : '',
-      expressionOptions: effectiveOptions,
-      expressions:
-          expressionList.isEmpty ? const ['我想要这个', '请帮我拿一下'] : expressionList,
-      bbox: bbox,
-    );
-  }
-
-  String _inferExpressionType(String phrase) {
-    if (phrase.contains('买') || phrase.contains('多少钱')) return '购买';
-    if (phrase.contains('喝') || phrase.contains('吃')) return '饮用';
-    if (phrase.contains('找') || phrase.contains('哪里')) return '寻找';
-    if (phrase.contains('拿') || phrase.contains('打开') || phrase.contains('用')) {
-      return '使用';
-    }
-    if (phrase.contains('帮') || phrase.contains('请')) return '求助';
-    return '表达';
-  }
-
-  List<ObjectExpressionOption> _parseExpressionOptions(dynamic raw) {
-    if (raw is! List) return const [];
-    final options = <ObjectExpressionOption>[];
-    final seenTypes = <String>{};
-    for (final value in raw.whereType<Map<String, dynamic>>()) {
-      final parsed = ObjectExpressionOption.fromJson(value);
-      if (parsed.phrase.isEmpty) continue;
-      final type = parsed.type.isEmpty
-          ? _inferExpressionType(parsed.phrase)
-          : parsed.type;
-      final normalizedType = type.replaceAll(RegExp(r'\s+'), '');
-      if (!seenTypes.add(normalizedType)) continue;
-      options.add(ObjectExpressionOption(type: type, phrase: parsed.phrase));
-      if (options.length == 3) break;
-    }
-    return options;
-  }
-
-  String _stripCodeFence(String value) {
-    return value
-        .replaceAll(RegExp(r'^```json\s*', multiLine: true), '')
-        .replaceAll(RegExp(r'^```\s*', multiLine: true), '')
-        .replaceAll(RegExp(r'\s*```$'), '')
-        .trim();
-  }
-
-  String _normalizeOption(String value) {
-    return value
-        .replaceAll(RegExp(r'^[\s\d.、\-]+'), '')
-        .replaceAll(RegExp(r'[。！？,.，；;：:]+$'), '')
-        .trim();
-  }
-
-  void _ensureConfigured() {
-    if (_apiKey.isEmpty) {
-      throw const QwenException(
-        '缺少 QWEN_API_KEY。请使用 --dart-define=QWEN_API_KEY=你的APIKey 启动应用。',
-      );
-    }
-  }
-}
-
 class LocalStore implements LocationDataStore {
   static const String _recentKey = 'recent_expressions';
   static const String _favoriteKey = 'favorite_expressions';
@@ -14940,6 +9220,11 @@ class LocalStore implements LocationDataStore {
     final updated =
         [text, ...existing.where((item) => item != text)].take(20).toList();
     await prefs.setStringList(_favoriteKey, updated);
+  }
+
+  Future<void> saveFavoriteExpressions(List<String> favorites) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_favoriteKey, favorites.take(20).toList());
   }
 
   Future<void> saveVocabularyEntries(List<VocabularyEntry> entries) async {
@@ -15020,20 +9305,23 @@ class LocalStore implements LocationDataStore {
 
   @override
   Future<String?> loadLocationRecommendationData() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_locationDataKey);
+    return SensitiveLocalStore.readString(
+      _locationDataKey,
+      legacySharedPreferencesKey: _locationDataKey,
+    );
   }
 
   @override
   Future<void> saveLocationRecommendationData(String data) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_locationDataKey, data);
+    await SensitiveLocalStore.writeString(_locationDataKey, data);
   }
 
   @override
   Future<void> clearLocationRecommendationData() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_locationDataKey);
+    await SensitiveLocalStore.delete(
+      _locationDataKey,
+      legacySharedPreferencesKey: _locationDataKey,
+    );
   }
 }
 

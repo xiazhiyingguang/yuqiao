@@ -21,6 +21,12 @@ class ParaformerAsrService {
     'DASHSCOPE_API_KEY',
     defaultValue: String.fromEnvironment('QWEN_API_KEY'),
   );
+  static const String _proxyUrl = String.fromEnvironment(
+    'YUQIAO_PARAFORMER_PROXY_WS_URL',
+  );
+  static const String _proxyToken = String.fromEnvironment(
+    'YUQIAO_PROXY_TOKEN',
+  );
   static const String _endpoint =
       'wss://dashscope.aliyuncs.com/api-ws/v1/inference';
 
@@ -46,9 +52,10 @@ class ParaformerAsrService {
     required AsrErrorCallback onError,
   }) async {
     if (_active) return;
-    if (_dashScopeApiKey.isEmpty) {
+    final usesProxy = _proxyUrl.trim().isNotEmpty;
+    if (!usesProxy && _dashScopeApiKey.isEmpty) {
       throw const ParaformerAsrException(
-        '缺少 DASHSCOPE_API_KEY 或 QWEN_API_KEY，无法启动云端语音识别。',
+        '缺少 DASHSCOPE_API_KEY、QWEN_API_KEY 或 YUQIAO_PARAFORMER_PROXY_WS_URL，无法启动云端语音识别。',
       );
     }
     if (!await _recorder.hasPermission()) {
@@ -66,9 +73,12 @@ class ParaformerAsrService {
 
     try {
       final socket = await WebSocket.connect(
-        _endpoint,
+        usesProxy ? _proxyUrl : _endpoint,
         headers: {
-          'Authorization': 'Bearer $_dashScopeApiKey',
+          if (usesProxy && _proxyToken.trim().isNotEmpty)
+            'Authorization': 'Bearer $_proxyToken'
+          else if (!usesProxy)
+            'Authorization': 'Bearer $_dashScopeApiKey',
           'user-agent': 'yuqiao-flutter/0.1.0',
         },
       ).timeout(const Duration(seconds: 12));
